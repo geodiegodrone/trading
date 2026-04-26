@@ -1,0 +1,20 @@
+[Unit]
+Description=Trading Dashboard (Binance Demo Futures)
+Wants=network-online.target
+After=network-online.target trading-bot.service
+
+[Service]
+Type=simple
+User=trading
+Group=trading
+WorkingDirectory=/opt/trading/bot
+EnvironmentFile=-/opt/trading/bot/.env
+ExecStart=/opt/trading/venv/bin/python -u dashboard_multi.py
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+

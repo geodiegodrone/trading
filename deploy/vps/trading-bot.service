@@ -1,0 +1,20 @@
+[Unit]
+Description=Trading Bot (Binance Demo Futures)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=trading
+Group=trading
+WorkingDirectory=/opt/trading/bot
+EnvironmentFile=-/opt/trading/bot/.env
+ExecStart=/opt/trading/venv/bin/python -u multi_bot.py
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+
