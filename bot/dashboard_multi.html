@@ -593,11 +593,26 @@
       display: grid;
       gap: 6px;
       padding: 16px 18px;
+      position: relative;
       border: 1px solid rgba(255,255,255,0.05);
       border-radius: 18px;
       background:
         linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)),
         linear-gradient(90deg, rgba(54, 211, 153, 0.04), rgba(125, 211, 252, 0.04));
+    }
+
+    .agents-hero::after {
+      content: "";
+      position: absolute;
+      inset: auto 18px 14px auto;
+      width: 128px;
+      height: 8px;
+      border-radius: 999px;
+      background:
+        linear-gradient(90deg, rgba(125, 211, 252, 0.18), rgba(54, 211, 153, 0.22)),
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.18) 0 10px, transparent 10px 18px);
+      opacity: 0.5;
+      pointer-events: none;
     }
 
     .agents-title {
@@ -622,7 +637,7 @@
       position: relative;
       display: grid;
       gap: 12px;
-      padding: 16px;
+      padding: 14px;
       border-radius: 18px;
       border: 1px solid rgba(255,255,255,0.05);
       background: rgba(17, 17, 23, 0.95);
@@ -633,20 +648,154 @@
       content: "";
       position: absolute;
       inset: 0;
-      background: radial-gradient(circle at top left, rgba(255,255,255,0.04), transparent 45%);
+      background:
+        radial-gradient(circle at top left, rgba(255,255,255,0.04), transparent 45%),
+        linear-gradient(180deg, rgba(255,255,255,0.02), transparent 20%, transparent 100%);
       pointer-events: none;
     }
 
-    .agent-face {
-      width: 84px;
-      height: 84px;
-      image-rendering: pixelated;
+    .agent-stage {
+      position: relative;
+      min-height: 140px;
       border-radius: 16px;
+      border: 1px solid rgba(255,255,255,0.06);
+      overflow: hidden;
+      background:
+        linear-gradient(180deg, rgba(13, 16, 23, 0.9), rgba(22, 24, 34, 0.98) 54%, rgba(17, 17, 23, 0.98) 100%);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+    }
+
+    .agent-stage::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(circle at 16% 16%, rgba(125,211,252,0.18), transparent 25%),
+        radial-gradient(circle at 82% 18%, rgba(54,211,153,0.16), transparent 22%),
+        linear-gradient(90deg, transparent 0 12%, rgba(255,255,255,0.04) 12% 12.5%, transparent 12.5% 35%, rgba(255,255,255,0.03) 35% 35.5%, transparent 35.5% 100%);
+      opacity: 0.7;
+      pointer-events: none;
+    }
+
+    .agent-stage::after {
+      content: "";
+      position: absolute;
+      inset: auto 0 0 0;
+      height: 40px;
+      background:
+        linear-gradient(180deg, transparent, rgba(0,0,0,0.08)),
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.02) 0 16px, transparent 16px 32px);
+      border-top: 1px solid rgba(255,255,255,0.04);
+      pointer-events: none;
+    }
+
+    .agent-room {
+      position: absolute;
+      inset: auto 0 0 0;
+      height: 42px;
+      background:
+        linear-gradient(180deg, rgba(30, 34, 43, 0.35), rgba(10, 12, 18, 0.84)),
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 10px, transparent 10px 18px);
+      border-top: 1px solid rgba(255,255,255,0.04);
+    }
+
+    .agent-desk {
+      position: absolute;
+      right: 18px;
+      bottom: 28px;
+      width: 78px;
+      height: 42px;
+      border-radius: 10px 10px 4px 4px;
+      background:
+        linear-gradient(180deg, rgba(214, 158, 60, 0.9), rgba(101, 67, 33, 0.98));
+      box-shadow:
+        0 8px 20px rgba(0,0,0,0.28),
+        inset 0 0 0 1px rgba(255,255,255,0.08);
+    }
+
+    .agent-desk::before,
+    .agent-desk::after {
+      content: "";
+      position: absolute;
+      bottom: -26px;
+      width: 8px;
+      height: 26px;
+      border-radius: 3px;
+      background: linear-gradient(180deg, rgba(100, 64, 31, 0.98), rgba(55, 36, 18, 0.98));
+    }
+
+    .agent-desk::before { left: 12px; }
+    .agent-desk::after { right: 10px; }
+
+    .agent-monitor {
+      position: absolute;
+      right: 30px;
+      bottom: 62px;
+      width: 26px;
+      height: 18px;
+      border-radius: 4px;
+      background:
+        linear-gradient(180deg, rgba(138, 180, 255, 0.95), rgba(28, 45, 76, 0.96));
+      box-shadow:
+        0 0 0 1px rgba(255,255,255,0.12),
+        0 0 16px rgba(96, 165, 250, 0.18);
+    }
+
+    .agent-monitor::after {
+      content: "";
+      position: absolute;
+      left: 10px;
+      bottom: -7px;
+      width: 6px;
+      height: 7px;
+      background: rgba(255,255,255,0.36);
+      box-shadow: 0 7px 0 rgba(255,255,255,0.16);
+    }
+
+    .agent-light {
+      position: absolute;
+      left: 14px;
+      top: 14px;
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--agent-accent, #7dd3fc);
+      box-shadow: 0 0 14px color-mix(in srgb, var(--agent-accent, #7dd3fc) 55%, transparent);
+      opacity: 0.95;
+    }
+
+    .agent-figure {
+      position: absolute;
+      left: 18px;
+      bottom: 28px;
+      width: 92px;
+      height: 92px;
+      image-rendering: pixelated;
+      display: grid;
+      place-items: end start;
+      will-change: transform;
+    }
+
+    .agent-face {
+      width: 86px;
+      height: 86px;
+      image-rendering: pixelated;
+      border-radius: 14px;
       border: 1px solid rgba(255,255,255,0.04);
       background: var(--agent-bg, #222);
       position: relative;
       overflow: hidden;
       box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+    }
+
+    .agent-face::after {
+      content: "";
+      position: absolute;
+      inset: auto 10px 8px 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(255,255,255,0.0), rgba(255,255,255,0.14), rgba(255,255,255,0.0));
+      opacity: 0.55;
     }
 
     .pixel-agent {
@@ -696,6 +845,38 @@
       color: #d1d5db;
       font-size: 12px;
       line-height: 1.45;
+    }
+
+    .agent-bubble {
+      position: absolute;
+      left: 104px;
+      top: 14px;
+      max-width: 150px;
+      padding: 7px 10px 8px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(10, 12, 18, 0.92);
+      color: #f8fafc;
+      font-size: 11px;
+      line-height: 1.35;
+      letter-spacing: 0.01em;
+      opacity: 0;
+      transform: translateY(4px) scale(0.98);
+      pointer-events: none;
+      box-shadow: 0 10px 24px rgba(0,0,0,0.25);
+    }
+
+    .agent-bubble::before {
+      content: "";
+      position: absolute;
+      left: -5px;
+      top: 11px;
+      width: 10px;
+      height: 10px;
+      background: inherit;
+      border-left: 1px solid rgba(255,255,255,0.08);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      transform: rotate(45deg);
     }
 
     .agent-meta {
@@ -766,6 +947,18 @@
       50% { filter: saturate(1.3) brightness(1.05); }
     }
 
+    @keyframes walkLoop {
+      0%, 100% { transform: translateX(0) translateY(0); }
+      25% { transform: translateX(5px) translateY(-1px); }
+      50% { transform: translateX(10px) translateY(0); }
+      75% { transform: translateX(5px) translateY(-1px); }
+    }
+
+    @keyframes bubblePulse {
+      0%, 100% { transform: translateY(0) scale(1); }
+      50% { transform: translateY(-1px) scale(1.02); }
+    }
+
     .agent-card.state-active {
       animation: floatCard 3.2s ease-in-out infinite;
     }
@@ -783,12 +976,72 @@
       animation: warnBlink 2.8s ease-in-out infinite;
     }
 
+    .agent-card.activity-typing .agent-bubble,
+    .agent-card.activity-reading .agent-bubble,
+    .agent-card.activity-walking .agent-bubble,
+    .agent-card.activity-waiting .agent-bubble,
+    .agent-card.activity-alert .agent-bubble {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+
+    .agent-card.activity-typing .agent-bubble {
+      border-color: rgba(125, 211, 252, 0.20);
+      color: #dbeafe;
+      animation: bubblePulse 1.2s ease-in-out infinite;
+    }
+
+    .agent-card.activity-reading .agent-bubble {
+      border-color: rgba(96, 165, 250, 0.18);
+      color: #e0f2fe;
+    }
+
+    .agent-card.activity-walking .agent-bubble {
+      border-color: rgba(251, 191, 36, 0.18);
+      color: #fef3c7;
+    }
+
+    .agent-card.activity-waiting .agent-bubble {
+      border-color: rgba(54, 211, 153, 0.20);
+      color: #d1fae5;
+    }
+
+    .agent-card.activity-alert .agent-bubble {
+      border-color: rgba(248, 113, 113, 0.25);
+      color: #fecaca;
+      animation: bubblePulse 0.8s ease-in-out infinite;
+    }
+
     .agent-card.state-busy {
       animation: busyCard 0.9s ease-in-out infinite;
     }
 
     .agent-card.state-busy .pixel-agent {
       animation: bob 1.3s ease-in-out infinite;
+    }
+
+    .agent-card.activity-typing .pixel-agent {
+      animation: bob 1.1s ease-in-out infinite;
+    }
+
+    .agent-card.activity-reading .pixel-agent {
+      animation: bob 2.8s ease-in-out infinite;
+    }
+
+    .agent-card.activity-walking .pixel-agent {
+      animation: bob 0.8s ease-in-out infinite;
+    }
+
+    .agent-card.activity-walking .agent-figure {
+      animation: walkLoop 1.8s ease-in-out infinite;
+    }
+
+    .agent-card.activity-walking .agent-desk {
+      opacity: 0.75;
+    }
+
+    .agent-card.activity-walking .agent-monitor {
+      opacity: 0.65;
     }
 
     .agent-card.state-busy .agent-status {
@@ -805,6 +1058,11 @@
 
     .agent-card.state-warn .agent-face {
       animation: warnBlink 1.2s ease-in-out infinite;
+    }
+
+    .agent-card.activity-alert {
+      border-color: rgba(248, 113, 113, 0.18);
+      box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.04), var(--shadow);
     }
 
     .agent-card.state-idle {
@@ -1188,20 +1446,51 @@
       return face.map((row) => row.split('').map((cell) => `<span class="px p${cell}"></span>`).join('')).join('');
     }
 
+    function agentActivityLabel(activity) {
+      const map = {
+        typing: 'Escribiendo',
+        reading: 'Leyendo',
+        walking: 'Caminando',
+        waiting: 'Esperando',
+        alert: 'En alerta',
+        idle: 'En pausa',
+      };
+      const key = String(activity || 'idle').toLowerCase();
+      return map[key] || key;
+    }
+
     function agentCardTemplate(agent) {
       const status = String(agent?.status || 'idle');
-      const cls = status === 'active' ? 'state-active' : status === 'warn' ? 'state-warn' : status === 'idle' ? 'state-idle' : 'state-busy';
+      const activity = String(agent?.activity || 'idle').toLowerCase();
+      const cls = `${status === 'active' ? 'state-active' : status === 'warn' ? 'state-warn' : status === 'idle' ? 'state-idle' : 'state-busy'} activity-${activity}`;
       const energy = Math.max(0, Math.min(100, Number(agent?.energy ?? 50)));
       const metrics = Array.isArray(agent?.metrics) ? agent.metrics : [];
       const meta = metrics.map((m) => `<span>${escapeHtml(m.label)}: ${escapeHtml(m.value)}</span>`).join('');
+      const bubbleText = {
+        typing: 'Escribiendo y validando cambios',
+        reading: 'Revisando archivos y contexto',
+        walking: 'Moviéndose hacia su puesto',
+        waiting: 'Esperando indicaciones',
+        alert: 'Atención requerida',
+        idle: 'Disponible',
+      }[activity] || 'Disponible';
       return `
         <article class="agent-card ${cls}" style="--agent-accent:${agent?.accent || '#7dd3fc'}; --agent-bg:${agent?.accent || '#222'}">
-          <div class="agent-face" aria-hidden="true">
-            <div class="pixel-agent">${agentsPixelArt(agent)}</div>
+          <div class="agent-stage" aria-hidden="true">
+            <div class="agent-room"></div>
+            <div class="agent-desk"></div>
+            <div class="agent-monitor"></div>
+            <div class="agent-light"></div>
+            <div class="agent-figure">
+              <div class="agent-face">
+                <div class="pixel-agent">${agentsPixelArt(agent)}</div>
+              </div>
+            </div>
+            <div class="agent-bubble">${escapeHtml(bubbleText)}</div>
           </div>
           <div class="agent-name">${escapeHtml(agent?.name || 'Agent')}</div>
           <div class="agent-role">${escapeHtml(agent?.role || '')}</div>
-          <div class="agent-status">${escapeHtml(status)}</div>
+          <div class="agent-status">${escapeHtml(status)} · ${escapeHtml(agentActivityLabel(activity))}</div>
           <div class="agent-task">${escapeHtml(agent?.task || '')}</div>
           <div class="agent-meta">${meta}</div>
           <div class="agent-bar"><div style="width:${energy}%"></div></div>
@@ -1214,11 +1503,20 @@
       const grid = document.getElementById('agentsGrid');
       if (grid) {
         grid.innerHTML = `
-          <article class="agent-card state-idle" style="--agent-accent:#7dd3fc">
-            <div class="agent-face"><div class="pixel-agent">${agentsPixelArt({ id: 'market-scout' })}</div></div>
+          <article class="agent-card state-idle activity-reading" style="--agent-accent:#7dd3fc">
+            <div class="agent-stage">
+              <div class="agent-room"></div>
+              <div class="agent-desk"></div>
+              <div class="agent-monitor"></div>
+              <div class="agent-light"></div>
+              <div class="agent-figure">
+                <div class="agent-face"><div class="pixel-agent">${agentsPixelArt({ id: 'market-scout' })}</div></div>
+              </div>
+              <div class="agent-bubble">Cargando escena pixel art</div>
+            </div>
             <div class="agent-name">Loading...</div>
             <div class="agent-role">Preparando agentes auxiliares</div>
-            <div class="agent-status">idle</div>
+            <div class="agent-status">idle · ${escapeHtml(agentActivityLabel('reading'))}</div>
             <div class="agent-task">Esperando snapshot del backend.</div>
             <div class="agent-bar"><div style="width:40%"></div></div>
             <div class="agent-foot"><span>energía</span><span>40%</span></div>
