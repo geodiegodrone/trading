@@ -2137,11 +2137,12 @@
     }
 
     const AGENT_LAYOUT = {
-      'market-scout': { left: '30%', top: '58%' },
-      'risk-warden': { left: '44%', top: '58%' },
-      'execution-runner': { left: '35%', top: '40%' },
-      'report-scribe': { left: '28%', top: '82%' },
-      'health-sentinel': { left: '78%', top: '36%' },
+      'market-scout': { left: '26%', top: '58%' },
+      'risk-warden': { left: '40%', top: '58%' },
+      'execution-runner': { left: '35%', top: '38%' },
+      'report-scribe': { left: '25%', top: '81%' },
+      'health-sentinel': { left: '79%', top: '35%' },
+      'task-subagent': { left: '72%', top: '76%' },
     };
 
     function agentColorStyle(agent) {
@@ -2232,6 +2233,7 @@
           { id: 'execution-runner', name: 'Execution Runner', activity: 'typing', accent: '#c084fc' },
           { id: 'report-scribe', name: 'Report Scribe', activity: 'typing', accent: '#60a5fa' },
           { id: 'health-sentinel', name: 'Health Sentinel', activity: 'waiting', accent: '#36d399' },
+          { id: 'task-subagent', name: 'Sub-agent', activity: 'reading', accent: '#f472b6', palette: ['#1f2937', '#f472b6', '#fde68a'] },
         ], 'Este es el código fuente de la oficina de agentes. Los personajes reflejan estado, espera, escritura y movimiento en tiempo real.');
       }
     }
@@ -2250,8 +2252,10 @@
         const warnings = Array.isArray(payload?.summary?.warnings) ? payload.summary.warnings : [];
         sub.textContent = `Listos: ${ready.length} | Activos: ${active.length} | Alertas: ${warnings.length}`;
       }
+      const visualAgents = agents.slice();
+      visualAgents.push({ id: 'task-subagent', name: 'Sub-agent', activity: 'reading', accent: '#f472b6', palette: ['#1f2937', '#f472b6', '#fde68a'] });
       grid.innerHTML = officeSceneTemplate(
-        agents,
+        visualAgents,
         'Este es el código fuente de la oficina de agentes. Los personajes reflejan estado, espera, escritura y movimiento en tiempo real.'
       );
     }
