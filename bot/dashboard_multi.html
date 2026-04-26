@@ -64,16 +64,14 @@
     }
 
     .header-top {
-      display: flex;
-      justify-content: space-between;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
       align-items: center;
       gap: 16px;
-      flex-wrap: wrap;
     }
 
     .header-health {
-      flex: 1 1 420px;
-      min-width: 280px;
+      min-width: 0;
       display: flex;
       align-items: center;
       justify-content: flex-end;
@@ -580,7 +578,7 @@
 
     @media (max-width: 720px) {
       .app { padding: 12px; }
-      .header { flex-direction: column; align-items: flex-start; }
+      .header-top { grid-template-columns: 1fr; }
       .header-health { width: 100%; justify-content: flex-start; flex-wrap: wrap; }
       .tabs { width: 100%; }
       .tab-btn { flex: 1 1 auto; justify-content: center; }
