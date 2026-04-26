@@ -1,0 +1,704 @@
+import asyncio
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+import pandas_ta as ta
+from dotenv import load_dotenv
+from fastapi import FastAPI, WebSocket
+from fastapi.responses import HTMLResponse
+
+import activity_log
+import binance_broker
+import market_stream
+from bot_config import get_symbol_config, parse_symbols
+import ml_model
+import trade_log
+
+ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
+
+app = FastAPI()
+
+HTML_PATH = ROOT / "dashboard_multi.html"
+PORTFOLIO_FILE = ROOT / "portfolio_state.json"
+DAILY_FILE = ROOT / "daily_balance.json"
+OPEN_TRADE_FILE = ROOT / "open_trade_id.json"
+
+SYMBOLS = parse_symbols()
+TAB_SYMBOLS = list(SYMBOLS)
+
+
+def _load_json(path, default):
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return default
+
+
+def _recent_activity(symbol: str | None = None, limit: int = 20):
+    try:
+        events = activity_log.get_recent(100)
+    except Exception:
+        return []
+    if symbol is None:
+        return events[:limit]
+    key = symbol.upper()
+    filtered = []
+    for event in events:
+        evt_symbol = str(event.get("symbol") or "").upper()
+        if evt_symbol == key or evt_symbol == "PORTFOLIO":
+            filtered.append(event)
+        if len(filtered) >= limit:
+            break
+    return filtered
+
+
+def _as_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _portfolio_state():
+    return _load_json(PORTFOLIO_FILE, {"open_positions": {}, "total_risk_pct": 0.0})
+
+
+def _open_trade_registry():
+    return _load_json(OPEN_TRADE_FILE, {})
+
+
+def _daily_state():
+    data = _load_json(DAILY_FILE, {})
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if data.get("date") != today:
+        try:
+            data = {"date": today, "daily_start_balance": _get_balance(), "paused": False}
+        except Exception:
+            data = {"date": today, "daily_start_balance": 0.0, "paused": False}
+    return data
+
+
+def _get_balance():
+    try:
+        return binance_broker.get_balance()
+    except Exception:
+        return 0.0
+
+
+def _fetch_candles(symbol, timeframe=5, limit=250):
+    klines = market_stream.get_candles(symbol, timeframe, limit)
+    if not klines:
+        klines = binance_broker.get_kline(symbol, timeframe, limit)
+    df = pd.DataFrame(klines, columns=["ts", "open", "high", "low", "close", "volume",
+                                        "close_time", "quote_vol", "trades",
+                                        "taker_base", "taker_quote", "ignore"])
+    df = df[["ts", "open", "high", "low", "close", "volume"]]
+    if df.empty:
+        return df
+    for col in ["ts", "open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.sort_values("ts").reset_index(drop=True)
+    return df
+
+
+
+
+def _compute_indicators(df, cfg):
+    if df.empty or len(df) < 50:
+        return df
+    fast = int(cfg.get("ema_fast", 9))
+    slow = int(cfg.get("ema_slow", 21))
+    trend = int(cfg.get("ema_trend", 200))
+    rsi_period = int(cfg.get("rsi_period", 14))
+    adx_period = int(cfg.get("adx_period", 14))
+    st_period = int(cfg.get("supertrend_period", 14))
+    st_mult = float(cfg.get("supertrend_mult", 3.5))
+    df[f"ema{fast}"] = ta.ema(df["close"], length=fast)
+    df[f"ema{slow}"] = ta.ema(df["close"], length=slow)
+    df[f"ema{trend}"] = ta.ema(df["close"], length=trend)
+    df["rsi"] = ta.rsi(df["close"], length=rsi_period)
+    adx = ta.adx(df["high"], df["low"], df["close"], length=adx_period)
+    adx_col = f"ADX_{adx_period}"
+    if adx is not None and adx_col in adx:
+        df["adx"] = adx[adx_col]
+    st = ta.supertrend(df["high"], df["low"], df["close"], length=st_period, multiplier=st_mult)
+    st_dir_col = f"SUPERTd_{st_period}_{st_mult}"
+    if st is not None and st_dir_col in st:
+        df["supertrend_direction"] = st[st_dir_col]
+    df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=int(cfg.get("atr_period", 14)))
+    df["vol_ma20"] = df["volume"].rolling(20).mean()
+    df.attrs["indicator_cols"] = {
+        "ema_fast": f"ema{fast}",
+        "ema_slow": f"ema{slow}",
+        "ema_trend": f"ema{trend}",
+        "supertrend_dir": "supertrend_direction",
+    }
+    return df
+def _position(symbol):
+    try:
+        pos = binance_broker.get_position(symbol)
+        if pos:
+            return {
+                "side": pos.get("side"),
+                "size": pos.get("size"),
+                "entry_price": pos.get("entry_price"),
+                "unrealisedPnl": pos.get("unrealised_pnl", 0.0),
+            }
+    except Exception:
+        pass
+    return None
+
+
+def _kelly_fraction():
+    try:
+        stats = trade_log.get_stats()
+        total = int(stats.get("total", 0))
+        if total < 20:
+            return 0.0
+        wins = int(stats.get("wins", 0))
+        losses = int(stats.get("losses", 0))
+        if total <= 0 or wins <= 0 or losses <= 0:
+            return 0.0
+        trades = trade_log.get_all_trades()
+        pnl_values = [float(t.get("pnl", 0.0)) for t in trades]
+        positive = [p for p in pnl_values if p > 0]
+        negative = [p for p in pnl_values if p < 0]
+        if not positive or not negative:
+            return 0.0
+        win_rate = wins / total
+        avg_win = sum(positive) / len(positive)
+        avg_loss = abs(sum(negative) / len(negative))
+        if avg_loss <= 0:
+            return 0.0
+        kelly = win_rate - (1 - win_rate) / (avg_win / avg_loss)
+        return max(kelly / 2.0, 0.02)
+    except Exception:
+        return 0.0
+
+
+def _daily_loss_pct(balance):
+    state = _daily_state()
+    start = _as_float(state.get("daily_start_balance"), balance)
+    if start <= 0:
+        return 0.0
+    if balance >= start:
+        return 0.0
+    return min(((start - balance) / start) / 0.03 * 100.0, 100.0)
+
+
+def _signal_from_last(last, cfg=None):
+    cfg = cfg or get_symbol_config("BTCUSDT")
+    cols = {
+        "ema_fast": f"ema{int(cfg.get('ema_fast', 9))}",
+        "ema_slow": f"ema{int(cfg.get('ema_slow', 21))}",
+        "ema_trend": f"ema{int(cfg.get('ema_trend', 200))}",
+    }
+    ema_fast = _as_float(last.get(cols["ema_fast"]))
+    ema_slow = _as_float(last.get(cols["ema_slow"]))
+    ema_trend = _as_float(last.get(cols["ema_trend"]))
+    rsi = _as_float(last.get("rsi"))
+    adx = _as_float(last.get("adx"))
+    st = int(_as_float(last.get("supertrend_direction")))
+    vol = _as_float(last.get("volume"))
+    vol_ma = _as_float(last.get("vol_ma20"))
+    close = _as_float(last.get("close"))
+    adx_threshold = float(cfg.get("adx_threshold", 25))
+    volume_mult = float(cfg.get("volume_mult", 1.2))
+    rsi_min = float(cfg.get("rsi_min", 30))
+    rsi_max = float(cfg.get("rsi_max", 70))
+    if (
+        ema_fast > ema_slow
+        and close > ema_trend
+        and st == 1
+        and adx > adx_threshold
+        and vol > vol_ma * volume_mult
+        and rsi_min < rsi < rsi_max
+    ):
+        return "LONG"
+    if (
+        ema_fast < ema_slow
+        and close < ema_trend
+        and st == -1
+        and adx > adx_threshold
+        and vol > vol_ma * volume_mult
+        and rsi_min < rsi < rsi_max
+    ):
+        return "SHORT"
+    return "NEUTRAL"
+
+
+def _trade_gate_state(last, cfg, position=None, ml_ready=False, ml_confidence=0.5):
+    if last is None:
+        return {"status": "SIN DATOS", "reason": "Esperando velas suficientes", "ready": False}
+
+    cols = {
+        "ema_fast": f"ema{int(cfg.get('ema_fast', 9))}",
+        "ema_slow": f"ema{int(cfg.get('ema_slow', 21))}",
+        "ema_trend": f"ema{int(cfg.get('ema_trend', 200))}",
+    }
+    ema_fast = _as_float(last.get(cols["ema_fast"]))
+    ema_slow = _as_float(last.get(cols["ema_slow"]))
+    ema_trend = _as_float(last.get(cols["ema_trend"]))
+    close = _as_float(last.get("close"))
+    rsi = _as_float(last.get("rsi"))
+    adx = _as_float(last.get("adx"))
+    volume = _as_float(last.get("volume"))
+    vol_ma20 = _as_float(last.get("vol_ma20"))
+    supertrend_dir = int(_as_float(last.get("supertrend_direction")))
+    adx_threshold = float(cfg.get("adx_threshold", 25))
+    volume_mult = float(cfg.get("volume_mult", 1.2))
+    rsi_min = float(cfg.get("rsi_min", 30))
+    rsi_max = float(cfg.get("rsi_max", 70))
+    ml_threshold = float(cfg.get("ml_threshold", 0.55))
+
+    if position:
+        return {"status": "POSICIÓN ABIERTA", "reason": "Ya hay una operación activa", "ready": False}
+
+    long_ok = (
+        ema_fast > ema_slow
+        and close > ema_trend
+        and supertrend_dir == 1
+        and adx > adx_threshold
+        and volume > (vol_ma20 * volume_mult if vol_ma20 else 0)
+        and rsi_min < rsi < rsi_max
+    )
+    short_ok = (
+        ema_fast < ema_slow
+        and close < ema_trend
+        and supertrend_dir == -1
+        and adx > adx_threshold
+        and volume > (vol_ma20 * volume_mult if vol_ma20 else 0)
+        and rsi_min < rsi < rsi_max
+    )
+    signal = "LONG" if long_ok else "SHORT" if short_ok else "NEUTRAL"
+    if signal == "NEUTRAL":
+        if adx <= adx_threshold:
+            return {"status": "ESPERANDO", "reason": f"ADX bajo ({adx:.2f} <= {adx_threshold:.2f})", "ready": False}
+        if vol_ma20 and volume <= vol_ma20 * volume_mult:
+            ratio = (volume / vol_ma20) if vol_ma20 else 0.0
+            return {"status": "ESPERANDO", "reason": f"Volumen bajo (x{ratio:.2f} < x{volume_mult:.2f})", "ready": False}
+        if not (rsi_min < rsi < rsi_max):
+            return {"status": "ESPERANDO", "reason": f"RSI fuera de rango ({rsi:.2f} vs {rsi_min:.0f}-{rsi_max:.0f})", "ready": False}
+        return {"status": "ESPERANDO", "reason": "Sin confluencia de entrada", "ready": False}
+    if not ml_ready:
+        return {"status": "FILTRADO", "reason": "ML entrenando", "ready": False}
+    if ml_confidence < ml_threshold:
+        return {"status": "FILTRADO", "reason": f"ML bajo umbral ({ml_confidence:.2f} < {ml_threshold:.2f})", "ready": False}
+    return {"status": "LISTO PARA OPERAR", "reason": f"Señal {signal} confirmada por filtros", "ready": True}
+
+
+def _health_issues_for_symbol(live_pos, local_pos, registry_trade_id, open_rows):
+    issues = []
+    if live_pos and not local_pos:
+        issues.append("Binance tiene posicion pero portfolio_state no")
+    if local_pos and not live_pos:
+        issues.append("portfolio_state tiene posicion pero Binance no")
+    if live_pos and registry_trade_id is None:
+        issues.append("Falta registro open_trade_id")
+    if not live_pos and open_rows:
+        issues.append("Existen trades abiertos huerfanos")
+    if live_pos and open_rows and len(open_rows) > 1:
+        issues.append("Hay mas de un trade abierto para el mismo simbolo")
+    if local_pos and registry_trade_id is None:
+        issues.append("portfolio_state no esta reflejado en el registry")
+    if live_pos and registry_trade_id is not None:
+        live_trade_ids = {int(row.get("id")) for row in open_rows if row.get("id") is not None}
+        if live_trade_ids and int(registry_trade_id) not in live_trade_ids:
+            issues.append("open_trade_id no coincide con el trade abierto")
+    return issues
+
+
+def _run_healthcheck():
+    import multi_bot
+
+    before_portfolio = _portfolio_state()
+    before_registry = _open_trade_registry()
+    before_open_rows = [t for t in trade_log.get_all_trades() if t.get("pnl") is None]
+
+    multi_bot.reconcile_state()
+
+    portfolio = _portfolio_state()
+    registry = _open_trade_registry()
+    daily = _daily_state()
+    daily_file = _load_json(DAILY_FILE, {})
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    per_symbol = []
+    issues = []
+    live_count = 0
+    for symbol in SYMBOLS:
+        live = _position(symbol)
+        local = portfolio.get("open_positions", {}).get(symbol)
+        registry_trade_id = registry.get(symbol)
+        open_rows = [row for row in trade_log.get_all_trades(symbol) if row.get("pnl") is None]
+        if live:
+            live_count += 1
+        symbol_issues = _health_issues_for_symbol(live, local, registry_trade_id, open_rows)
+        if symbol_issues:
+            for issue in symbol_issues:
+                issues.append(f"{symbol}: {issue}")
+        per_symbol.append(
+            {
+                "symbol": symbol,
+                "live": bool(live),
+                "local": bool(local),
+                "registry": registry_trade_id is not None,
+                "open_rows": len(open_rows),
+                "issues": symbol_issues,
+            }
+        )
+
+    daily_issues = []
+    if daily_file.get("date") != today:
+        daily_issues.append("daily_balance.json no corresponde al dia actual")
+    if _as_float(daily.get("daily_start_balance")) <= 0:
+        daily_issues.append("daily_start_balance invalido")
+    if daily.get("paused") not in (True, False):
+        daily_issues.append("paused invalido")
+    if daily_issues:
+        for issue in daily_issues:
+            issues.append(f"DAILY: {issue}")
+
+    open_rows_after = [t for t in trade_log.get_all_trades() if t.get("pnl") is None]
+    local_count = len(portfolio.get("open_positions", {}) or {})
+    registry_count = len(registry)
+    summary = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "ok": len(issues) == 0,
+        "reconciled": True,
+        "counts": {
+            "live_positions": live_count,
+            "local_positions": local_count,
+            "registry_entries": registry_count,
+            "open_trade_rows_before": len(before_open_rows),
+            "open_trade_rows_after": len(open_rows_after),
+        },
+        "checks": [
+            {
+                "name": "Binance vs estado local",
+                "status": "ok" if live_count == local_count and not any(item["issues"] for item in per_symbol) else "warn",
+                "details": f"{live_count} posiciones vivas, {local_count} posiciones locales",
+            },
+            {
+                "name": "Registry de trades",
+                "status": "ok" if registry_count == live_count else "warn",
+                "details": f"{registry_count} entradas activas",
+            },
+            {
+                "name": "Trades abiertos huerfanos",
+                "status": "ok" if len(open_rows_after) == 0 else "warn",
+                "details": f"{len(open_rows_after)} filas abiertas en DB",
+            },
+            {
+                "name": "Balance diario",
+                "status": "ok" if not daily_issues else "warn",
+                "details": f"{daily.get('date') or '--'} | start {float(daily.get('daily_start_balance') or 0.0):.2f}",
+            },
+        ],
+        "symbols": per_symbol,
+        "issues": issues,
+        "before": {
+            "open_trade_rows": len(before_open_rows),
+            "local_positions": len(before_portfolio.get("open_positions", {}) or {}),
+            "registry_entries": len(before_registry),
+        },
+    }
+
+    if issues:
+        activity_log.push(
+            "PORTFOLIO",
+            "warning",
+            f"Chequeo de salud: {len(issues)} desajuste(s) detectado(s)",
+            {"issues": issues, "counts": summary["counts"]},
+        )
+    else:
+        activity_log.push(
+            "PORTFOLIO",
+            "info",
+            "Chequeo de salud: estado limpio y reconciliado",
+            {"counts": summary["counts"]},
+        )
+    return summary
+
+
+def _build_symbol_payload(symbol):
+    cfg = get_symbol_config(symbol)
+    cfg_timeframe = int(cfg.get("timeframe", os.getenv("TIMEFRAME", "5")))
+    df = _fetch_candles(symbol, cfg_timeframe)
+    df = _compute_indicators(df, cfg)
+    events = _recent_activity(symbol, 20)
+    if df.empty or len(df) < 50:
+        return {
+            "price": 0.0,
+            "ema9": 0.0,
+            "ema21": 0.0,
+            "rsi": 0.0,
+            "signal": "NEUTRAL",
+            "position": None,
+            "candles": [],
+            "kpis": {},
+            "indicators": {},
+            "trade_gate": {"status": "SIN DATOS", "reason": "Esperando velas suficientes", "ready": False},
+            "events": events,
+        }
+    last = df.iloc[-1].to_dict()
+    cols = df.attrs.get("indicator_cols", {})
+    price = _as_float(last.get("close"))
+    position = _position(symbol)
+    open_trades = 1 if position else 0
+    balance = _get_balance()
+    stats = trade_log.get_stats(symbol)
+    symbol_trades = trade_log.get_all_trades(symbol)
+    features = {
+        "ema9_minus_ema21_pct": ((_as_float(last.get(cols.get("ema_fast", "ema9"))) - _as_float(last.get(cols.get("ema_slow", "ema21")))) / _as_float(last.get(cols.get("ema_slow", "ema21"))) * 100) if _as_float(last.get(cols.get("ema_slow", "ema21"))) else 0.0,
+        "rsi": _as_float(last.get("rsi")),
+        "price_vs_ema200_pct": ((price - _as_float(last.get(cols.get("ema_trend", "ema200")))) / _as_float(last.get(cols.get("ema_trend", "ema200"))) * 100) if _as_float(last.get(cols.get("ema_trend", "ema200"))) else 0.0,
+        "candle_body_pct": abs(_as_float(last.get("close")) - _as_float(last.get("open"))) / _as_float(last.get("open")) * 100 if _as_float(last.get("open")) else 0.0,
+        "adx": _as_float(last.get("adx")),
+        "supertrend_direction": int(_as_float(last.get(cols.get("supertrend_dir", "supertrend_direction")))) if last.get(cols.get("supertrend_dir", "supertrend_direction")) is not None else 0,
+        "volume_vs_ma20_ratio": _as_float(last.get("volume")) / _as_float(last.get("vol_ma20")) if _as_float(last.get("vol_ma20")) else 0.0,
+        "atr_pct": _as_float(last.get("atr")) / price * 100 if price else 0.0,
+    }
+    ml_ready = False
+    ml_confidence = 0.5
+    try:
+        ml_ready = bool(ml_model.is_ready(symbol))
+    except TypeError:
+        try:
+            ml_ready = bool(ml_model.is_ready())
+        except Exception:
+            ml_ready = False
+    except Exception:
+        ml_ready = False
+    if ml_ready:
+        try:
+            ml_confidence = _as_float(ml_model.predict(features, symbol), 0.5)
+        except TypeError:
+            try:
+                ml_confidence = _as_float(ml_model.predict(features), 0.5)
+            except Exception:
+                ml_confidence = 0.5
+        except Exception:
+            ml_confidence = 0.5
+    kpis = {
+        "balance": balance,
+        "balance_start": 50000.0,
+        "pnl_realized": sum(_as_float(t.get("pnl"), 0.0) for t in symbol_trades),
+        "pnl_unrealized": _as_float(position.get("unrealisedPnl")) if position else 0.0,
+        "pnl_total": 0.0,
+        "trade_count": int(stats.get("total", 0)),
+        "open_trades": open_trades,
+        "closed_trades": int(stats.get("total", 0)),
+        "wins": int(stats.get("wins", 0)),
+        "losses": int(stats.get("losses", 0)),
+        "win_rate": _as_float(stats.get("win_rate")),
+        "best_trade": _as_float(stats.get("best")),
+        "worst_trade": _as_float(stats.get("worst")),
+        "ml_ready": ml_ready,
+        "ml_confidence": ml_confidence,
+        "trade_stats": stats,
+    }
+    kpis["pnl_total"] = kpis["pnl_realized"] + kpis["pnl_unrealized"]
+    indicators = {
+        "adx": _as_float(last.get("adx")),
+        "supertrend_direction": int(_as_float(last.get(cols.get("supertrend_dir", "supertrend_direction")))) if last.get(cols.get("supertrend_dir", "supertrend_direction")) is not None else 0,
+        "volume_ratio": _as_float(last.get("volume")) / _as_float(last.get("vol_ma20")) if _as_float(last.get("vol_ma20")) else 0.0,
+        "atr": _as_float(last.get("atr")),
+        "ema200": _as_float(last.get(cols.get("ema_trend", "ema200"))),
+        "market_regime": "TRENDING" if _as_float(last.get("adx")) > float(cfg.get("adx_threshold", 25)) else "RANGING",
+        "daily_loss_pct": _daily_loss_pct(balance),
+        "kelly_fraction": _kelly_fraction(),
+    }
+    trade_gate = _trade_gate_state(last, cfg, position=position, ml_ready=ml_ready, ml_confidence=ml_confidence)
+    candles = [
+        {
+            "ts": int(row["ts"]),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+        }
+        for _, row in df.tail(50).iterrows()
+    ]
+    return {
+        "price": price,
+        "ema9": _as_float(last.get(cols.get("ema_fast", "ema9"))),
+        "ema21": _as_float(last.get(cols.get("ema_slow", "ema21"))),
+        "rsi": _as_float(last.get("rsi")),
+        "signal": _signal_from_last(last, cfg),
+        "position": position,
+        "candles": candles,
+        "kpis": kpis,
+        "indicators": indicators,
+        "trade_gate": trade_gate,
+        "events": events,
+    }
+
+
+def _portfolio_payload():
+    balance = _get_balance()
+    trades = trade_log.get_all_trades()
+    stats = trade_log.get_stats()
+    realized = sum(_as_float(t.get("pnl"), 0.0) for t in trades)
+    open_positions = {}
+    unrealized = 0.0
+    state = _portfolio_state()
+    for symbol in SYMBOLS:
+        pos = _position(symbol)
+        if pos:
+            open_positions[symbol] = {
+                "side": pos.get("side"),
+                "size": pos.get("size"),
+                "entry": pos.get("entry_price"),
+                "pnl": pos.get("unrealisedPnl"),
+            }
+            unrealized += _as_float(pos.get("unrealisedPnl"))
+        else:
+            open_positions[symbol] = None
+    total_risk = _as_float(state.get("total_risk_pct"))
+    start = 50000.0
+    daily = _daily_state()
+    start_balance = _as_float(daily.get("daily_start_balance"), balance)
+    daily_loss_pct = _daily_loss_pct(balance)
+    return {
+        "total_balance": balance,
+        "total_pnl_realized": realized,
+        "total_pnl_unrealized": unrealized,
+        "total_pnl_pct": ((realized + unrealized) / start_balance * 100.0) if start_balance else 0.0,
+        "portfolio_risk_pct": total_risk,
+        "positions": open_positions,
+        "daily_loss_pct": daily_loss_pct,
+        "trade_count": int(stats.get("total", 0)),
+        "wins": int(stats.get("wins", 0)),
+        "losses": int(stats.get("losses", 0)),
+        "win_rate": _as_float(stats.get("win_rate")),
+        "best_trade": _as_float(stats.get("best")),
+        "worst_trade": _as_float(stats.get("worst")),
+        "trade_stats": stats,
+        "ml_confidence": 0.5,
+    }
+
+
+
+
+_cache: dict = {}
+_health_cache: dict = {"report": None}
+
+
+def _store_health_report(report: dict):
+    _health_cache["report"] = report
+    _cache["health"] = report
+    return report
+
+
+def _get_health_report():
+    report = _health_cache.get("report") or _cache.get("health")
+    return report if isinstance(report, dict) else None
+
+
+async def _refresh_cache():
+    while True:
+        try:
+            _cache["portfolio"] = await asyncio.to_thread(_portfolio_payload)
+        except Exception:
+            pass
+        try:
+            _cache["activity"] = activity_log.get_recent(50)
+        except Exception:
+            pass
+        for sym in TAB_SYMBOLS:
+            try:
+                _cache[sym] = await asyncio.to_thread(_build_symbol_payload, sym)
+            except Exception:
+                pass
+        await asyncio.sleep(5)
+
+
+async def _healthcheck_loop():
+    interval = max(60, int(os.getenv("HEALTHCHECK_INTERVAL_SEC", "900")))
+    await asyncio.sleep(10)
+    while True:
+        try:
+            report = await asyncio.to_thread(_run_healthcheck)
+            _store_health_report(report)
+        except Exception as exc:
+            _store_health_report({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "ok": False,
+                "reconciled": False,
+                "error": str(exc),
+                "issues": [str(exc)],
+            })
+        await asyncio.sleep(interval)
+
+
+@app.on_event("startup")
+async def startup():
+    market_stream.start([(symbol, int(get_symbol_config(symbol).get("timeframe", os.getenv("TIMEFRAME", "5")))) for symbol in SYMBOLS])
+    asyncio.create_task(_refresh_cache())
+    asyncio.create_task(_healthcheck_loop())
+
+
+@app.get("/")
+async def index():
+    return HTMLResponse(HTML_PATH.read_text(encoding="utf-8"))
+
+
+@app.post("/api/healthcheck")
+async def api_healthcheck():
+    report = await asyncio.to_thread(_run_healthcheck)
+    return _store_health_report(report)
+
+
+@app.get("/api/healthcheck/latest")
+async def api_healthcheck_latest():
+    report = _get_health_report()
+    if report is None:
+        report = await asyncio.to_thread(_run_healthcheck)
+        _store_health_report(report)
+    return report
+
+
+@app.websocket("/ws/portfolio")
+async def ws_portfolio(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            await websocket.send_json(_cache.get("portfolio", {}))
+            await asyncio.sleep(1)
+    except Exception:
+        pass
+
+
+@app.websocket("/ws/activity")
+async def ws_activity(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            await websocket.send_json(_cache.get("activity", []))
+            await asyncio.sleep(1)
+    except Exception:
+        pass
+
+
+@app.websocket("/ws/{symbol}")
+async def ws_symbol(websocket: WebSocket, symbol: str):
+    await websocket.accept()
+    try:
+        while True:
+            await websocket.send_json(_cache.get(symbol, {}))
+            await asyncio.sleep(1)
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("dashboard_multi:app", host="0.0.0.0", port=8000, reload=False)

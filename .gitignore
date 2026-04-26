@@ -1,0 +1,25 @@
+.DS_Store
+/.vscode
+/.playwright-cli
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+
+# Rust / flowsurface build output
+/flowsurface/target/
+/flowsurface/.git.flowsurface.backup/
+
+# Trading bot runtime state
+/bot/.env
+/bot/trades.db
+/bot/daily_balance.json
+/bot/portfolio_state.json
+/bot/open_trade_id.json
+/bot/__pycache__/
+/bot/backtest_walkforward_report.json
