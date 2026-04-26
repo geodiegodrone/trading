@@ -54,15 +54,21 @@
     }
 
     .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 16px;
+      display: grid;
+      gap: 14px;
       padding: 18px 22px;
       border: 1px solid var(--line);
       border-radius: 20px;
       background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
       box-shadow: var(--shadow);
+    }
+
+    .header-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
     }
 
     .title {
@@ -122,22 +128,21 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 16px;
-      padding: 14px 18px;
+      gap: 12px;
+      padding: 12px 14px;
       border: 1px solid var(--line);
-      border-radius: 18px;
-      background: rgba(21, 21, 27, 0.92);
-      box-shadow: var(--shadow);
+      border-radius: 16px;
+      background: rgba(21, 21, 27, 0.70);
     }
 
     .health-copy {
       display: grid;
-      gap: 6px;
+      gap: 4px;
       min-width: 0;
     }
 
     .health-title {
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 800;
       letter-spacing: 0.12em;
       text-transform: uppercase;
@@ -145,14 +150,14 @@
     }
 
     .health-summary {
-      font-size: 15px;
+      font-size: 14px;
       font-weight: 700;
       letter-spacing: -0.02em;
     }
 
     .health-details {
       color: var(--muted);
-      font-size: 13px;
+      font-size: 12px;
       line-height: 1.45;
     }
 
@@ -587,25 +592,28 @@
 <body>
   <div class="app">
     <header class="header">
-      <div class="title">
-        <h1>Panel del bot de trading</h1>
-        <div class="sub">Panel demo multi-activo para Binance</div>
+      <div class="header-top">
+        <div class="title">
+          <h1>Panel del bot de trading</h1>
+          <div class="sub">Panel demo multi-activo para Binance</div>
+        </div>
+        <div class="badges">
+          <div class="pill">[DEMO]</div>
+          <div class="pill live">[EN VIVO]</div>
+        </div>
       </div>
-      <div class="badges">
-        <div class="pill">[DEMO]</div>
-        <div class="pill live">[EN VIVO]</div>
-        <button type="button" class="pill action" id="healthCheckBtn">Revisar salud</button>
+      <div class="health-strip">
+        <div class="health-copy">
+          <div class="health-title">Chequeo de salud</div>
+          <div class="health-summary" id="healthSummary">Listo para revisar Binance, el estado local y la DB.</div>
+          <div class="health-details" id="healthDetails">Pulsa el boton para reconciliar automaticamente y ver desajustes.</div>
+        </div>
+        <div class="badges">
+          <div class="pill" id="healthState">SIN CHEQUEO</div>
+          <button type="button" class="pill action" id="healthCheckBtn">Revisar salud</button>
+        </div>
       </div>
     </header>
-
-    <section class="health-strip">
-      <div class="health-copy">
-        <div class="health-title">Chequeo de salud</div>
-        <div class="health-summary" id="healthSummary">Listo para revisar Binance, el estado local y la DB.</div>
-        <div class="health-details" id="healthDetails">Pulsa el boton para reconciliar automaticamente y ver desajustes.</div>
-      </div>
-      <div class="pill" id="healthState">SIN CHEQUEO</div>
-    </section>
 
     <nav class="tabs" id="tabs"></nav>
 
