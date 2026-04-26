@@ -602,10 +602,111 @@ def _get_health_report():
     return report if isinstance(report, dict) else None
 
 
+def _agents_payload():
+    portfolio = _cache.get("portfolio") or _portfolio_payload()
+    health = _get_health_report() or {}
+    symbols = {sym: _cache.get(sym) or {} for sym in SYMBOLS}
+    open_positions = portfolio.get("positions", {}) or {}
+    trade_gates = {
+        sym: (symbols.get(sym, {}) or {}).get("trade_gate", {})
+        for sym in SYMBOLS
+    }
+    ready_symbols = [sym for sym, gate in trade_gates.items() if gate.get("ready")]
+    active_symbols = [sym for sym, pos in open_positions.items() if pos]
+    warnings = health.get("issues", []) if isinstance(health, dict) else []
+    daily_loss = _as_float((portfolio or {}).get("daily_loss_pct"))
+    risk_pct = _as_float((portfolio or {}).get("portfolio_risk_pct"))
+    return {
+        "title": "Agentes auxiliares",
+        "subtitle": "Supervisión pixel art de market, risk, health, execution y reporting.",
+        "agents": [
+            {
+                "id": "market-scout",
+                "name": "Market Scout",
+                "role": "Explora señales y vigila BTC, ETH, XRP, SOL, XAU y XAG.",
+                "status": "active" if ready_symbols else "idle",
+                "task": "Detectando activos con confluencia lista para entrada.",
+                "energy": min(100, 30 + len(ready_symbols) * 15),
+                "accent": "#7dd3fc",
+                "palette": ["#111827", "#22c55e", "#fbbf24"],
+                "metrics": [
+                    {"label": "ready", "value": len(ready_symbols)},
+                    {"label": "watching", "value": len(SYMBOLS)},
+                ],
+            },
+            {
+                "id": "risk-warden",
+                "name": "Risk Warden",
+                "role": "Controla riesgo de portafolio y freno diario.",
+                "status": "warn" if daily_loss >= 66 or risk_pct >= 4 else "active",
+                "task": "Manteniendo el tamaño dentro del límite y vigilando drawdown.",
+                "energy": max(10, 100 - int(max(daily_loss, risk_pct * 20))),
+                "accent": "#fbbf24",
+                "palette": ["#111827", "#f59e0b", "#f87171"],
+                "metrics": [
+                    {"label": "risk%", "value": f"{risk_pct:.2f}"},
+                    {"label": "daily%", "value": f"{daily_loss:.1f}"},
+                ],
+            },
+            {
+                "id": "health-sentinel",
+                "name": "Health Sentinel",
+                "role": "Reconciliación y consistencia entre Binance, DB y JSON.",
+                "status": "warn" if warnings else "active",
+                "task": "Comparando estado local contra Binance en busca de desajustes.",
+                "energy": 100 if not warnings else 55,
+                "accent": "#36d399",
+                "palette": ["#111827", "#36d399", "#60a5fa"],
+                "metrics": [
+                    {"label": "issues", "value": len(warnings)},
+                    {"label": "synced", "value": "yes" if not warnings else "check"},
+                ],
+            },
+            {
+                "id": "execution-runner",
+                "name": "Execution Runner",
+                "role": "Abre, gestiona y cierra posiciones con control de riesgo.",
+                "status": "active" if active_symbols else "idle",
+                "task": "Manteniendo posiciones vivas y aplicando break-even / trailing.",
+                "energy": min(100, 35 + len(active_symbols) * 20),
+                "accent": "#c084fc",
+                "palette": ["#111827", "#c084fc", "#22c55e"],
+                "metrics": [
+                    {"label": "open", "value": len(active_symbols)},
+                    {"label": "watch", "value": len([s for s in SYMBOLS if s not in active_symbols])},
+                ],
+            },
+            {
+                "id": "report-scribe",
+                "name": "Report Scribe",
+                "role": "Resume historial, actividad y estado del tablero.",
+                "status": "active",
+                "task": "Escribiendo notas breves para revisión humana.",
+                "energy": 88,
+                "accent": "#60a5fa",
+                "palette": ["#111827", "#60a5fa", "#f59e0b"],
+                "metrics": [
+                    {"label": "logs", "value": len(_recent_activity(None, 20))},
+                    {"label": "assets", "value": len(SYMBOLS)},
+                ],
+            },
+        ],
+        "summary": {
+            "ready_symbols": ready_symbols,
+            "active_symbols": active_symbols,
+            "warnings": warnings[:3],
+        },
+    }
+
+
 async def _refresh_cache():
     while True:
         try:
             _cache["portfolio"] = await asyncio.to_thread(_portfolio_payload)
+        except Exception:
+            pass
+        try:
+            _cache["agents"] = await asyncio.to_thread(_agents_payload)
         except Exception:
             pass
         try:
@@ -683,6 +784,17 @@ async def ws_activity(websocket: WebSocket):
         while True:
             await websocket.send_json(_cache.get("activity", []))
             await asyncio.sleep(1)
+    except Exception:
+        pass
+
+
+@app.websocket("/ws/agents")
+async def ws_agents(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            await websocket.send_json(_cache.get("agents", _agents_payload()))
+            await asyncio.sleep(2)
     except Exception:
         pass
 

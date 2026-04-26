@@ -78,6 +78,10 @@
       gap: 12px;
     }
 
+    .header-health .health-copy {
+      min-width: 0;
+    }
+
     .title {
       display: flex;
       flex-direction: column;
@@ -129,6 +133,12 @@
     .pill.action:disabled {
       opacity: 0.65;
       cursor: wait;
+    }
+
+    .pill.agents {
+      background: rgba(209, 213, 219, 0.08);
+      border-color: rgba(209, 213, 219, 0.2);
+      color: #e5e7eb;
     }
 
     .health-copy {
@@ -569,10 +579,169 @@
       border-bottom: 1px dashed rgba(255,255,255,0.04);
     }
 
+    .agents-panel {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(21, 21, 27, 0.92);
+      box-shadow: var(--shadow);
+      display: grid;
+      gap: 16px;
+    }
+
+    .agents-hero {
+      display: grid;
+      gap: 6px;
+      padding: 16px 18px;
+      border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 18px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)),
+        linear-gradient(90deg, rgba(54, 211, 153, 0.04), rgba(125, 211, 252, 0.04));
+    }
+
+    .agents-title {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+
+    .agents-sub {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .agents-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .agent-card {
+      position: relative;
+      display: grid;
+      gap: 12px;
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,0.05);
+      background: rgba(17, 17, 23, 0.95);
+      overflow: hidden;
+    }
+
+    .agent-card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at top left, rgba(255,255,255,0.04), transparent 45%);
+      pointer-events: none;
+    }
+
+    .agent-face {
+      width: 84px;
+      height: 84px;
+      image-rendering: pixelated;
+      border-radius: 16px;
+      border: 1px solid rgba(255,255,255,0.04);
+      background: var(--agent-bg, #222);
+      position: relative;
+      overflow: hidden;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+    }
+
+    .pixel-agent {
+      position: absolute;
+      inset: 14px;
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      grid-template-rows: repeat(8, 1fr);
+      gap: 1px;
+      filter: drop-shadow(0 4px 10px rgba(0,0,0,0.35));
+      animation: bob 3.8s ease-in-out infinite;
+    }
+
+    .pixel-agent .px { border-radius: 1px; }
+    .pixel-agent .p0 { background: transparent; }
+    .pixel-agent .p1 { background: var(--px-1); }
+    .pixel-agent .p2 { background: var(--px-2); }
+    .pixel-agent .p3 { background: var(--px-3); }
+
+    .agent-name {
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .agent-role {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .agent-status {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      padding: 7px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.03);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .agent-task {
+      color: #d1d5db;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .agent-meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .agent-bar {
+      height: 8px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #232432;
+      border: 1px solid rgba(255,255,255,0.04);
+    }
+
+    .agent-bar > div {
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--agent-accent), rgba(255,255,255,0.15));
+    }
+
+    .agent-foot {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .agent-card.busy .agent-status { color: var(--yellow); border-color: rgba(251,191,36,0.2); }
+    .agent-card.ok .agent-status { color: var(--green); border-color: rgba(54,211,153,0.2); }
+    .agent-card.warn .agent-status { color: var(--red); border-color: rgba(248,113,113,0.2); }
+
+    @keyframes bob {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-2px); }
+    }
+
 
     @media (max-width: 1280px) {
       .portfolio-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .grid { grid-template-columns: 1fr; }
+      .agents-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .chart-shell { height: 520px; min-height: 520px; }
     }
 
@@ -583,6 +752,7 @@
       .tabs { width: 100%; }
       .tab-btn { flex: 1 1 auto; justify-content: center; }
       .portfolio-grid { grid-template-columns: 1fr; }
+      .agents-grid { grid-template-columns: 1fr; }
       .chart-shell { height: 420px; min-height: 420px; }
     }
   </style>
@@ -657,6 +827,16 @@
       </div>
     </section>
 
+    <section class="panel" id="agentsPanel">
+      <div class="agents-panel">
+        <div class="agents-hero">
+          <div class="agents-title" id="agentsTitle">Agentes auxiliares</div>
+          <div class="agents-sub" id="agentsSub">Supervisión pixel art de mercado, riesgo, salud y ejecución.</div>
+        </div>
+        <div class="agents-grid" id="agentsGrid"></div>
+      </div>
+    </section>
+
     <section id="symbolPanels"></section>
   </div>
 
@@ -674,6 +854,7 @@
     const fmt = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const state = {
       portfolio: null,
+      agents: null,
       symbols: Object.fromEntries(SYMBOLS.map((s) => [s, { snapshot: null, chart: null }]))
     };
 
@@ -719,6 +900,7 @@
     function buildTabs() {
       tabs.innerHTML = [
         `<button class="tab-btn active" data-tab="portfolio"><span class="dot"></span>📊 Portafolio</button>`,
+        `<button class="tab-btn" data-tab="agents"><span class="dot"></span>🤖 Agentes</button>`,
         ...SYMBOLS.map((symbol) => {
           const meta = SYMBOL_META[symbol];
           return `<button class="tab-btn" data-tab="${symbol}"><span class="dot" id="dot-${symbol}"></span>${meta.label}</button>`;
@@ -869,6 +1051,120 @@
       `;
     }
 
+    function agentsPixelArt(agent) {
+      const key = String(agent?.id || 'bot');
+      const faces = {
+        'market-scout': [
+          '00111100',
+          '01222100',
+          '12222210',
+          '12333321',
+          '12333321',
+          '12222210',
+          '01222100',
+          '00111100',
+        ],
+        'risk-warden': [
+          '00111100',
+          '01111110',
+          '11222211',
+          '12322321',
+          '12322321',
+          '11222211',
+          '01111110',
+          '00111100',
+        ],
+        'health-sentinel': [
+          '00111100',
+          '01222100',
+          '12211221',
+          '12333321',
+          '12333321',
+          '12211221',
+          '01222100',
+          '00111100',
+        ],
+        'execution-runner': [
+          '00111100',
+          '01122110',
+          '11233211',
+          '12333321',
+          '12333321',
+          '11233211',
+          '01122110',
+          '00111100',
+        ],
+        'report-scribe': [
+          '00111100',
+          '01222100',
+          '12222210',
+          '12311321',
+          '12311321',
+          '12222210',
+          '01222100',
+          '00111100',
+        ],
+      };
+      const face = faces[key] || faces['report-scribe'];
+      return face.map((row) => row.split('').map((cell) => `<span class="px p${cell}"></span>`).join('')).join('');
+    }
+
+    function agentCardTemplate(agent) {
+      const status = String(agent?.status || 'idle');
+      const cls = status === 'active' ? 'ok' : status === 'warn' ? 'warn' : 'busy';
+      const energy = Math.max(0, Math.min(100, Number(agent?.energy ?? 50)));
+      const metrics = Array.isArray(agent?.metrics) ? agent.metrics : [];
+      const meta = metrics.map((m) => `<span>${escapeHtml(m.label)}: ${escapeHtml(m.value)}</span>`).join('');
+      return `
+        <article class="agent-card ${cls}" style="--agent-accent:${agent?.accent || '#7dd3fc'}; --agent-bg:${agent?.accent || '#222'}">
+          <div class="agent-face" aria-hidden="true">
+            <div class="pixel-agent">${agentsPixelArt(agent)}</div>
+          </div>
+          <div class="agent-name">${escapeHtml(agent?.name || 'Agent')}</div>
+          <div class="agent-role">${escapeHtml(agent?.role || '')}</div>
+          <div class="agent-status">${escapeHtml(status)}</div>
+          <div class="agent-task">${escapeHtml(agent?.task || '')}</div>
+          <div class="agent-meta">${meta}</div>
+          <div class="agent-bar"><div style="width:${energy}%"></div></div>
+          <div class="agent-foot"><span>energía</span><span>${energy}%</span></div>
+        </article>
+      `;
+    }
+
+    function buildAgentsPanel() {
+      const grid = document.getElementById('agentsGrid');
+      if (grid) {
+        grid.innerHTML = `
+          <article class="agent-card busy" style="--agent-accent:#7dd3fc">
+            <div class="agent-face"><div class="pixel-agent">${agentsPixelArt({ id: 'market-scout' })}</div></div>
+            <div class="agent-name">Loading...</div>
+            <div class="agent-role">Preparando agentes auxiliares</div>
+            <div class="agent-status">idle</div>
+            <div class="agent-task">Esperando snapshot del backend.</div>
+            <div class="agent-bar"><div style="width:40%"></div></div>
+            <div class="agent-foot"><span>energía</span><span>40%</span></div>
+          </article>
+        `;
+      }
+    }
+
+    function renderAgents(payload) {
+      state.agents = payload;
+      const grid = document.getElementById('agentsGrid');
+      const title = document.getElementById('agentsTitle');
+      const sub = document.getElementById('agentsSub');
+      if (!grid) return;
+      const agents = Array.isArray(payload?.agents) ? payload.agents : [];
+      if (title) title.textContent = payload?.title || 'Agentes auxiliares';
+      if (sub) {
+        const ready = Array.isArray(payload?.summary?.ready_symbols) ? payload.summary.ready_symbols : [];
+        const active = Array.isArray(payload?.summary?.active_symbols) ? payload.summary.active_symbols : [];
+        const warnings = Array.isArray(payload?.summary?.warnings) ? payload.summary.warnings : [];
+        sub.textContent = `Listos: ${ready.length} | Activos: ${active.length} | Alertas: ${warnings.length}`;
+      }
+      grid.innerHTML = agents.map(agentCardTemplate).join('');
+    }
+
     function buildSymbolPanels() {
       symbolPanels.innerHTML = SYMBOLS.map(panelTemplate).join('');
     }
@@ -876,6 +1172,7 @@
     function switchTab(tab) {
       document.querySelectorAll('.tab-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === tab));
       document.getElementById('portfolioPanel').classList.toggle('active', tab === 'portfolio');
+      document.getElementById('agentsPanel').classList.toggle('active', tab === 'agents');
       SYMBOLS.forEach((symbol) => {
         document.getElementById(`panel-${symbol}`).classList.toggle('active', tab === symbol);
       });
@@ -1378,10 +1675,12 @@
     }
 
     buildTabs();
+    buildAgentsPanel();
     buildSymbolPanels();
     const healthBtn = document.getElementById('healthCheckBtn');
     if (healthBtn) healthBtn.addEventListener('click', runHealthCheck);
     connectWS('ws://localhost:8000/ws/portfolio', renderPortfolio);
+    connectWS('ws://localhost:8000/ws/agents', renderAgents);
     SYMBOLS.forEach((symbol) => connectWS(`ws://localhost:8000/ws/${symbol}`, (d) => updateSymbol(symbol, d)));
     SYMBOLS.forEach((symbol) => renderActivity(shortSymbol(symbol)));
     connectWS('ws://localhost:8000/ws/activity', updateActivity);
