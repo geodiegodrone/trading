@@ -71,6 +71,15 @@
       flex-wrap: wrap;
     }
 
+    .header-health {
+      flex: 1 1 420px;
+      min-width: 280px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 12px;
+    }
+
     .title {
       display: flex;
       flex-direction: column;
@@ -124,21 +133,11 @@
       cursor: wait;
     }
 
-    .health-strip {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 12px 14px;
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      background: rgba(21, 21, 27, 0.70);
-    }
-
     .health-copy {
       display: grid;
       gap: 4px;
       min-width: 0;
+      flex: 1 1 auto;
     }
 
     .health-title {
@@ -582,6 +581,7 @@
     @media (max-width: 720px) {
       .app { padding: 12px; }
       .header { flex-direction: column; align-items: flex-start; }
+      .header-health { width: 100%; justify-content: flex-start; flex-wrap: wrap; }
       .tabs { width: 100%; }
       .tab-btn { flex: 1 1 auto; justify-content: center; }
       .portfolio-grid { grid-template-columns: 1fr; }
@@ -597,20 +597,18 @@
           <h1>Panel del bot de trading</h1>
           <div class="sub">Panel demo multi-activo para Binance</div>
         </div>
-        <div class="badges">
-          <div class="pill">[DEMO]</div>
-          <div class="pill live">[EN VIVO]</div>
-        </div>
-      </div>
-      <div class="health-strip">
-        <div class="health-copy">
-          <div class="health-title">Chequeo de salud</div>
+        <div class="header-health">
+          <div class="health-copy">
+            <div class="health-title">Chequeo de salud</div>
           <div class="health-summary" id="healthSummary">Listo para revisar Binance, el estado local y la DB.</div>
           <div class="health-details" id="healthDetails">Pulsa el boton para reconciliar automaticamente y ver desajustes.</div>
-        </div>
-        <div class="badges">
-          <div class="pill" id="healthState">SIN CHEQUEO</div>
-          <button type="button" class="pill action" id="healthCheckBtn">Revisar salud</button>
+          </div>
+          <div class="badges">
+            <div class="pill" id="healthState">SIN CHEQUEO</div>
+            <button type="button" class="pill action" id="healthCheckBtn">Revisar salud</button>
+            <div class="pill">[DEMO]</div>
+            <div class="pill live">[EN VIVO]</div>
+          </div>
         </div>
       </div>
     </header>
