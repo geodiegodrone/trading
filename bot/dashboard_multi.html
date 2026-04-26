@@ -628,8 +628,7 @@
     }
 
     .agents-grid {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      display: block;
       gap: 14px;
     }
 
@@ -1074,6 +1073,644 @@
       animation: bob 3.8s ease-in-out infinite;
     }
 
+    .agents-scene {
+      position: relative;
+      width: 100%;
+      min-height: 660px;
+      padding: 18px;
+      border-radius: 24px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.06);
+      background:
+        linear-gradient(180deg, rgba(9, 13, 20, 0.96), rgba(15, 18, 26, 0.98)),
+        radial-gradient(circle at 10% 10%, rgba(125,211,252,0.07), transparent 25%),
+        radial-gradient(circle at 90% 18%, rgba(54,211,153,0.06), transparent 22%);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+    }
+
+    .agents-scene::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(circle at 18% 18%, rgba(255,255,255,0.05) 0 1px, transparent 1px 100%),
+        radial-gradient(circle at 82% 16%, rgba(255,255,255,0.04) 0 1px, transparent 1px 100%);
+      pointer-events: none;
+      opacity: 0.65;
+    }
+
+    .agents-scene .scene-note {
+      position: relative;
+      z-index: 2;
+      margin-bottom: 14px;
+      color: #dbeafe;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .agents-scene .scene-note a {
+      color: #60a5fa;
+      text-decoration: underline;
+    }
+
+    .office-board {
+      position: relative;
+      min-height: 580px;
+      border-radius: 20px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.08);
+      background:
+        linear-gradient(180deg, rgba(15, 21, 32, 0.9), rgba(15, 21, 32, 0.92));
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+    }
+
+    .office-room {
+      position: absolute;
+      border: 1px solid rgba(0,0,0,0.28);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
+    }
+
+    .office-left {
+      left: 0;
+      top: 0;
+      width: 58%;
+      height: 100%;
+      background:
+        linear-gradient(90deg, rgba(0,0,0,0.08) 0 8px, transparent 8px 100%),
+        repeating-linear-gradient(90deg, rgba(0,0,0,0.06) 0 2px, transparent 2px 24px),
+        repeating-linear-gradient(0deg, rgba(0,0,0,0.06) 0 2px, transparent 2px 24px),
+        #9b642e;
+      background-blend-mode: multiply;
+    }
+
+    .office-kitchen {
+      right: 0;
+      top: 0;
+      width: 42%;
+      height: 34%;
+      background:
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.06) 0 2px, transparent 2px 26px),
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.06) 0 2px, transparent 2px 26px),
+        linear-gradient(180deg, #e7d9c9, #efe7dc);
+    }
+
+    .office-lounge {
+      right: 0;
+      bottom: 0;
+      width: 42%;
+      height: 42%;
+      background:
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 2px, transparent 2px 26px),
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.04) 0 2px, transparent 2px 26px),
+        linear-gradient(180deg, #4f84b5, #4d7699);
+    }
+
+    .office-hall {
+      right: 0;
+      top: 34%;
+      width: 42%;
+      height: 24%;
+      background: linear-gradient(180deg, #182431, #1c2938);
+      border-left: 1px solid rgba(255,255,255,0.05);
+      border-top: 1px solid rgba(255,255,255,0.05);
+    }
+
+    .office-wall {
+      position: absolute;
+      background: #16202e;
+      border-right: 1px solid rgba(255,255,255,0.05);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+    }
+
+    .office-wall.left {
+      left: 58%;
+      top: 0;
+      width: 2%;
+      height: 100%;
+    }
+
+    .office-wall.mid {
+      right: 42%;
+      top: 34%;
+      width: 42%;
+      height: 2%;
+    }
+
+    .office-shelf {
+      position: absolute;
+      width: 98px;
+      height: 46px;
+      border-radius: 4px;
+      background:
+        linear-gradient(180deg, #7a5230 0 14px, #b68953 14px 16px, #7a5230 16px 100%);
+      box-shadow: inset 0 0 0 2px rgba(0,0,0,0.18);
+    }
+
+    .office-shelf::before {
+      content: "";
+      position: absolute;
+      left: 6px;
+      right: 6px;
+      top: 10px;
+      height: 6px;
+      background:
+        linear-gradient(90deg, #cfa76b 0 10px, #7c4a1f 10px 14px, #d6c08a 14px 24px, #8f5b2c 24px 28px, #d1a96d 28px 38px, transparent 38px 100%);
+      box-shadow: 0 11px 0 #c9a66e, 0 22px 0 #9a6b3c;
+    }
+
+    .office-shelf.left {
+      left: 24px;
+      top: 16px;
+    }
+
+    .office-shelf.top {
+      left: 210px;
+      top: 16px;
+    }
+
+    .office-boxes {
+      position: absolute;
+      left: 24px;
+      top: 66px;
+      width: 70px;
+      height: 42px;
+      background:
+        linear-gradient(180deg, #d0a763, #b28248);
+      box-shadow: 36px 0 0 #d1ad71, 18px 18px 0 #bb8d4e;
+    }
+
+    .office-plant {
+      position: absolute;
+      width: 24px;
+      height: 34px;
+      background:
+        radial-gradient(circle at 50% 10%, #4ade80 0 6px, transparent 6px),
+        radial-gradient(circle at 20% 20%, #2f855a 0 5px, transparent 5px),
+        radial-gradient(circle at 80% 20%, #34d399 0 5px, transparent 5px),
+        linear-gradient(180deg, #9ca3af 0 5px, #e5e7eb 5px 100%);
+    }
+
+    .office-plant.left { left: 12px; top: 120px; }
+    .office-plant.bottom { left: 320px; bottom: 10px; }
+    .office-plant.right-top { right: 14px; top: 16px; }
+    .office-plant.right-bottom { right: 10px; bottom: 10px; }
+
+    .desk-row {
+      position: absolute;
+      left: 110px;
+      top: 180px;
+      display: grid;
+      grid-template-columns: repeat(2, 120px);
+      gap: 28px 74px;
+    }
+
+    .desk {
+      position: relative;
+      width: 120px;
+      height: 56px;
+      border-radius: 4px 4px 2px 2px;
+      background: linear-gradient(180deg, #a3662c, #6f431d);
+      box-shadow: inset 0 0 0 2px rgba(0,0,0,0.18);
+    }
+
+    .desk::before,
+    .desk::after {
+      content: "";
+      position: absolute;
+      bottom: -22px;
+      width: 10px;
+      height: 22px;
+      background: #5f3717;
+      border-radius: 2px;
+    }
+
+    .desk::before { left: 16px; }
+    .desk::after { right: 16px; }
+
+    .desk .monitor {
+      position: absolute;
+      left: 50%;
+      top: -20px;
+      width: 26px;
+      height: 18px;
+      transform: translateX(-50%);
+      border-radius: 3px;
+      background: linear-gradient(180deg, #cbd5e1, #475569);
+      box-shadow: 0 0 0 2px #31261c, 0 0 0 4px #e2e8f0;
+    }
+
+    .desk .mug {
+      position: absolute;
+      right: 10px;
+      top: 18px;
+      width: 8px;
+      height: 10px;
+      border-radius: 2px;
+      background: #f8fafc;
+      box-shadow: 0 0 0 2px #d1d5db;
+    }
+
+    .kitchen-cabinet {
+      position: absolute;
+      right: 20px;
+      top: 18px;
+      width: 50px;
+      height: 100px;
+      border-radius: 4px;
+      background: linear-gradient(180deg, #cbd5e1, #94a3b8);
+      box-shadow: inset 0 0 0 2px rgba(0,0,0,0.14);
+    }
+
+    .water-cooler {
+      position: absolute;
+      left: 12px;
+      top: 16px;
+      width: 30px;
+      height: 64px;
+      border-radius: 6px;
+      background: linear-gradient(180deg, #cbd5e1, #94a3b8);
+      box-shadow: inset 0 0 0 2px rgba(0,0,0,0.12);
+    }
+
+    .water-cooler::before {
+      content: "";
+      position: absolute;
+      left: 7px;
+      top: -10px;
+      width: 16px;
+      height: 18px;
+      border-radius: 8px 8px 2px 2px;
+      background: rgba(191, 219, 254, 0.9);
+      box-shadow: 0 0 0 2px #64748b;
+    }
+
+    .water-cooler::after {
+      content: "";
+      position: absolute;
+      left: 9px;
+      bottom: 8px;
+      width: 12px;
+      height: 10px;
+      background: rgba(255,255,255,0.4);
+      border-radius: 2px;
+    }
+
+    .clock {
+      position: absolute;
+      left: 50%;
+      top: 12px;
+      width: 20px;
+      height: 20px;
+      border-radius: 999px;
+      transform: translateX(-50%);
+      background: #f8fafc;
+      box-shadow: inset 0 0 0 2px #64748b;
+    }
+
+    .clock::before,
+    .clock::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      background: #334155;
+      transform-origin: left center;
+    }
+
+    .clock::before {
+      width: 6px;
+      height: 2px;
+      transform: translate(-50%, -50%) rotate(20deg);
+    }
+
+    .clock::after {
+      width: 2px;
+      height: 7px;
+      transform: translate(-50%, -50%) rotate(180deg);
+    }
+
+    .meeting-table {
+      position: absolute;
+      left: 50%;
+      top: 58%;
+      width: 118px;
+      height: 46px;
+      transform: translate(-50%, -50%);
+      border-radius: 8px;
+      background: linear-gradient(180deg, #c08c4e, #6d4520);
+      box-shadow: inset 0 0 0 2px rgba(0,0,0,0.16);
+    }
+
+    .meeting-chair {
+      position: absolute;
+      width: 18px;
+      height: 24px;
+      border-radius: 4px;
+      background: linear-gradient(180deg, #d4a372, #6e4725);
+    }
+
+    .meeting-chair.left { left: 118px; top: 180px; }
+    .meeting-chair.right { right: 118px; top: 180px; }
+
+    .meeting-shelf {
+      position: absolute;
+      width: 76px;
+      height: 34px;
+      top: 72px;
+      background: linear-gradient(180deg, #8a623d, #5a3920);
+      box-shadow: inset 0 0 0 2px rgba(0,0,0,0.12);
+    }
+
+    .meeting-shelf.left { left: 24px; }
+    .meeting-shelf.right { right: 24px; }
+
+    .meeting-picture {
+      position: absolute;
+      left: 50%;
+      top: 52px;
+      width: 80px;
+      height: 26px;
+      transform: translateX(-50%);
+      border: 2px solid #7aa6c7;
+      background: linear-gradient(180deg, #9ad0f5, #7ec67d);
+      box-shadow: 0 0 0 2px rgba(0,0,0,0.18);
+    }
+
+    .meeting-plant {
+      position: absolute;
+      width: 18px;
+      height: 30px;
+      background:
+        radial-gradient(circle at 50% 8%, #4ade80 0 5px, transparent 5px),
+        radial-gradient(circle at 25% 18%, #2f855a 0 4px, transparent 4px),
+        radial-gradient(circle at 75% 18%, #34d399 0 4px, transparent 4px),
+        linear-gradient(180deg, #cbd5e1 0 5px, #94a3b8 5px 100%);
+    }
+
+    .meeting-plant.left { left: 12px; bottom: 8px; }
+    .meeting-plant.right { right: 12px; bottom: 8px; }
+
+    .agent-stage-layers {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    .agent-unit {
+      position: absolute;
+      width: 64px;
+      height: 86px;
+      transform: translate(-50%, -100%);
+      will-change: transform;
+    }
+
+    .agent-unit .agent-shadow {
+      position: absolute;
+      left: 50%;
+      bottom: 4px;
+      width: 28px;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(0,0,0,0.24);
+      transform: translateX(-50%);
+      filter: blur(3px);
+    }
+
+    .agent-unit .agent-sprite {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      transform-origin: bottom center;
+    }
+
+    .agent-unit .agent-head {
+      position: absolute;
+      left: 50%;
+      top: 0;
+      width: 28px;
+      height: 28px;
+      transform: translateX(-50%);
+      border-radius: 6px;
+      overflow: hidden;
+      border: 2px solid rgba(0,0,0,0.16);
+      background: var(--agent-bg, #222);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
+    }
+
+    .agent-unit .agent-head .pixel-agent {
+      inset: 4px;
+      animation-duration: 2.8s;
+    }
+
+    .agent-unit .agent-body {
+      position: absolute;
+      left: 50%;
+      top: 24px;
+      width: 20px;
+      height: 22px;
+      transform: translateX(-50%);
+      border-radius: 4px 4px 3px 3px;
+      background: linear-gradient(180deg, var(--agent-shirt, #d1d5db), color-mix(in srgb, var(--agent-shirt, #d1d5db) 70%, #111));
+      border: 2px solid rgba(0,0,0,0.14);
+    }
+
+    .agent-unit .agent-arms {
+      position: absolute;
+      left: 50%;
+      top: 28px;
+      width: 38px;
+      height: 10px;
+      transform: translateX(-50%);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .agent-unit .agent-arm {
+      width: 12px;
+      height: 6px;
+      border-radius: 3px;
+      background: var(--agent-shirt, #d1d5db);
+      border: 1px solid rgba(0,0,0,0.14);
+    }
+
+    .agent-unit .agent-legs {
+      position: absolute;
+      left: 50%;
+      top: 44px;
+      width: 24px;
+      height: 24px;
+      transform: translateX(-50%);
+      display: flex;
+      justify-content: center;
+      gap: 3px;
+    }
+
+    .agent-unit .agent-leg {
+      width: 8px;
+      height: 22px;
+      border-radius: 2px;
+      background: var(--agent-pants, #6b7280);
+      border: 1px solid rgba(0,0,0,0.16);
+      transform-origin: top center;
+    }
+
+    .agent-unit .agent-nameplate {
+      position: absolute;
+      left: 50%;
+      top: 66px;
+      min-width: 86px;
+      padding: 3px 6px;
+      transform: translateX(-50%);
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(10, 12, 18, 0.82);
+      color: #f8fafc;
+      font-size: 10px;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .agent-unit .agent-bubble {
+      left: 44px;
+      top: -6px;
+      min-width: 118px;
+      max-width: 160px;
+      opacity: 0;
+      transform: translateY(4px) scale(0.98);
+    }
+
+    .agent-unit.pose-seated .agent-body {
+      top: 29px;
+      width: 22px;
+      height: 18px;
+    }
+
+    .agent-unit.pose-seated .agent-legs {
+      top: 46px;
+      width: 28px;
+    }
+
+    .agent-unit.pose-seated .agent-leg {
+      height: 12px;
+      width: 10px;
+    }
+
+    .agent-unit.pose-seated .agent-arms {
+      top: 30px;
+      width: 34px;
+    }
+
+    .agent-unit.pose-seated .agent-arm.left {
+      transform: rotate(10deg);
+    }
+
+    .agent-unit.pose-seated .agent-arm.right {
+      transform: rotate(-12deg);
+    }
+
+    .agent-unit.pose-typing .agent-sprite {
+      animation: floatBob 1.4s ease-in-out infinite;
+    }
+
+    .agent-unit.pose-typing .agent-arm.left {
+      animation: armTypeLeft 0.9s ease-in-out infinite;
+      transform-origin: right center;
+    }
+
+    .agent-unit.pose-typing .agent-arm.right {
+      animation: armTypeRight 0.9s ease-in-out infinite;
+      transform-origin: left center;
+    }
+
+    .agent-unit.pose-reading .agent-sprite {
+      animation: floatBob 2.1s ease-in-out infinite;
+    }
+
+    .agent-unit.pose-reading .agent-body {
+      transform: translateX(-50%) rotate(-2deg);
+    }
+
+    .agent-unit.pose-walking .agent-sprite {
+      animation: walkBob 1.15s ease-in-out infinite;
+    }
+
+    .agent-unit.pose-walking .agent-leg.left {
+      animation: legWalkLeft 0.8s ease-in-out infinite;
+    }
+
+    .agent-unit.pose-walking .agent-leg.right {
+      animation: legWalkRight 0.8s ease-in-out infinite;
+    }
+
+    .agent-unit.pose-walking .agent-arm.left {
+      animation: armWalkLeft 0.8s ease-in-out infinite;
+    }
+
+    .agent-unit.pose-walking .agent-arm.right {
+      animation: armWalkRight 0.8s ease-in-out infinite;
+    }
+
+    .agent-unit.pose-waiting .agent-sprite {
+      animation: floatBob 2.6s ease-in-out infinite;
+    }
+
+    .agent-unit.pose-alert .agent-sprite {
+      animation: alertShake 0.75s ease-in-out infinite;
+    }
+
+    @keyframes floatBob {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-3px); }
+    }
+
+    @keyframes walkBob {
+      0%, 100% { transform: translateY(0) translateX(0); }
+      25% { transform: translateY(-1px) translateX(2px); }
+      50% { transform: translateY(0) translateX(4px); }
+      75% { transform: translateY(-1px) translateX(2px); }
+    }
+
+    @keyframes legWalkLeft {
+      0%, 100% { transform: rotate(10deg); }
+      50% { transform: rotate(-18deg); }
+    }
+
+    @keyframes legWalkRight {
+      0%, 100% { transform: rotate(-10deg); }
+      50% { transform: rotate(16deg); }
+    }
+
+    @keyframes armWalkLeft {
+      0%, 100% { transform: rotate(-16deg); }
+      50% { transform: rotate(14deg); }
+    }
+
+    @keyframes armWalkRight {
+      0%, 100% { transform: rotate(14deg); }
+      50% { transform: rotate(-16deg); }
+    }
+
+    @keyframes armTypeLeft {
+      0%, 100% { transform: rotate(28deg); }
+      50% { transform: rotate(6deg); }
+    }
+
+    @keyframes armTypeRight {
+      0%, 100% { transform: rotate(-28deg); }
+      50% { transform: rotate(-6deg); }
+    }
+
+    @keyframes alertShake {
+      0%, 100% { transform: translateX(0); }
+      20% { transform: translateX(-2px); }
+      40% { transform: translateX(2px); }
+      60% { transform: translateX(-2px); }
+      80% { transform: translateX(2px); }
+    }
+
 
     @media (max-width: 1280px) {
       .portfolio-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1453,75 +2090,133 @@
         walking: 'Caminando',
         waiting: 'Esperando',
         alert: 'En alerta',
+        monitoring: 'Vigilando',
         idle: 'En pausa',
       };
       const key = String(activity || 'idle').toLowerCase();
       return map[key] || key;
     }
 
-    function agentCardTemplate(agent) {
-      const status = String(agent?.status || 'idle');
-      const activity = String(agent?.activity || 'idle').toLowerCase();
-      const cls = `${status === 'active' ? 'state-active' : status === 'warn' ? 'state-warn' : status === 'idle' ? 'state-idle' : 'state-busy'} activity-${activity}`;
-      const energy = Math.max(0, Math.min(100, Number(agent?.energy ?? 50)));
-      const metrics = Array.isArray(agent?.metrics) ? agent.metrics : [];
-      const meta = metrics.map((m) => `<span>${escapeHtml(m.label)}: ${escapeHtml(m.value)}</span>`).join('');
-      const bubbleText = {
+    function agentPoseClass(activity, status) {
+      const key = String(activity || 'idle').toLowerCase();
+      if (key === 'typing') return 'pose-seated pose-typing';
+      if (key === 'reading') return 'pose-seated pose-reading';
+      if (key === 'walking') return 'pose-walking';
+      if (key === 'waiting' || key === 'monitoring') return 'pose-seated pose-waiting';
+      if (key === 'alert') return 'pose-alert';
+      return status === 'active' ? 'pose-seated pose-reading' : 'pose-seated';
+    }
+
+    function agentBubbleText(activity) {
+      return {
         typing: 'Escribiendo y validando cambios',
         reading: 'Revisando archivos y contexto',
         walking: 'Moviéndose hacia su puesto',
         waiting: 'Esperando indicaciones',
+        monitoring: 'Vigilando métricas y riesgo',
         alert: 'Atención requerida',
         idle: 'Disponible',
-      }[activity] || 'Disponible';
+      }[String(activity || 'idle').toLowerCase()] || 'Disponible';
+    }
+
+    const AGENT_LAYOUT = {
+      'market-scout': { left: '30%', top: '58%' },
+      'risk-warden': { left: '44%', top: '58%' },
+      'execution-runner': { left: '35%', top: '40%' },
+      'report-scribe': { left: '28%', top: '82%' },
+      'health-sentinel': { left: '78%', top: '36%' },
+    };
+
+    function agentColorStyle(agent) {
+      const accent = agent?.accent || '#7dd3fc';
+      const palette = Array.isArray(agent?.palette) && agent.palette.length >= 3 ? agent.palette : ['#111827', accent, '#f8fafc'];
+      const shirt = palette[1] || accent;
+      const dark = palette[0] || '#111827';
+      const light = palette[2] || '#f8fafc';
+      return [
+        `--agent-accent:${accent}`,
+        `--agent-shirt:${shirt}`,
+        `--agent-pants:${dark}`,
+        `--px-1:${dark}`,
+        `--px-2:${light}`,
+        `--px-3:${shirt}`,
+      ].join(';');
+    }
+
+    function agentUnitTemplate(agent, index) {
+      const id = String(agent?.id || `agent-${index}`);
+      const layout = AGENT_LAYOUT[id] || { left: `${18 + index * 14}%`, top: index % 2 === 0 ? '68%' : '42%' };
+      const status = String(agent?.status || 'idle');
+      const activity = String(agent?.activity || 'idle').toLowerCase();
+      const pose = agentPoseClass(activity, status);
+      const energy = Math.max(0, Math.min(100, Number(agent?.energy ?? 50)));
+      const showBubble = activity === 'typing' || activity === 'waiting' || activity === 'alert' || activity === 'monitoring';
       return `
-        <article class="agent-card ${cls}" style="--agent-accent:${agent?.accent || '#7dd3fc'}; --agent-bg:${agent?.accent || '#222'}">
-          <div class="agent-stage" aria-hidden="true">
-            <div class="agent-room"></div>
-            <div class="agent-desk"></div>
-            <div class="agent-monitor"></div>
-            <div class="agent-light"></div>
-            <div class="agent-figure">
-              <div class="agent-face">
-                <div class="pixel-agent">${agentsPixelArt(agent)}</div>
-              </div>
-            </div>
-            <div class="agent-bubble">${escapeHtml(bubbleText)}</div>
+        <div class="agent-unit ${pose}" title="${escapeHtml(agent?.name || 'Agent')} · ${escapeHtml(agentActivityLabel(activity))}" style="left:${layout.left}; top:${layout.top}; ${agentColorStyle(agent)}">
+          <div class="agent-shadow"></div>
+          <div class="agent-sprite">
+            <div class="agent-head"><div class="pixel-agent">${agentsPixelArt(agent)}</div></div>
+            <div class="agent-body"></div>
+            <div class="agent-arms"><span class="agent-arm left"></span><span class="agent-arm right"></span></div>
+            <div class="agent-legs"><span class="agent-leg left"></span><span class="agent-leg right"></span></div>
           </div>
-          <div class="agent-name">${escapeHtml(agent?.name || 'Agent')}</div>
-          <div class="agent-role">${escapeHtml(agent?.role || '')}</div>
-          <div class="agent-status">${escapeHtml(status)} · ${escapeHtml(agentActivityLabel(activity))}</div>
-          <div class="agent-task">${escapeHtml(agent?.task || '')}</div>
-          <div class="agent-meta">${meta}</div>
-          <div class="agent-bar"><div style="width:${energy}%"></div></div>
-          <div class="agent-foot"><span>energía</span><span>${energy}%</span></div>
-        </article>
+          ${showBubble ? `<div class="agent-bubble">${escapeHtml(agentBubbleText(activity))}</div>` : ''}
+        </div>
+      `;
+    }
+
+    function officeSceneTemplate(agents, subtitle) {
+      const agentMarkup = agents.map((agent, index) => agentUnitTemplate(agent, index)).join('');
+      return `
+        <div class="agents-scene">
+          <div class="scene-note">${escapeHtml(subtitle || '')}</div>
+          <div class="office-board">
+            <div class="office-left"></div>
+            <div class="office-kitchen"></div>
+            <div class="office-lounge"></div>
+            <div class="office-hall"></div>
+            <div class="office-wall left"></div>
+            <div class="office-wall mid"></div>
+            <div class="office-shelf left"></div>
+            <div class="office-shelf top"></div>
+            <div class="office-boxes"></div>
+            <div class="office-plant left"></div>
+            <div class="office-plant bottom"></div>
+            <div class="office-plant right-top"></div>
+            <div class="office-plant right-bottom"></div>
+            <div class="desk-row">
+              <div class="desk"><div class="monitor"></div><div class="mug"></div></div>
+              <div class="desk"><div class="monitor"></div><div class="mug"></div></div>
+              <div class="desk"><div class="monitor"></div><div class="mug"></div></div>
+              <div class="desk"><div class="monitor"></div><div class="mug"></div></div>
+            </div>
+            <div class="kitchen-cabinet"></div>
+            <div class="water-cooler"></div>
+            <div class="clock"></div>
+            <div class="meeting-shelf left"></div>
+            <div class="meeting-shelf right"></div>
+            <div class="meeting-picture"></div>
+            <div class="meeting-table"></div>
+            <div class="meeting-chair left"></div>
+            <div class="meeting-chair right"></div>
+            <div class="meeting-plant left"></div>
+            <div class="meeting-plant right"></div>
+            <div class="agent-stage-layers">${agentMarkup}</div>
+          </div>
+        </div>
       `;
     }
 
     function buildAgentsPanel() {
       const grid = document.getElementById('agentsGrid');
       if (grid) {
-        grid.innerHTML = `
-          <article class="agent-card state-idle activity-reading" style="--agent-accent:#7dd3fc">
-            <div class="agent-stage">
-              <div class="agent-room"></div>
-              <div class="agent-desk"></div>
-              <div class="agent-monitor"></div>
-              <div class="agent-light"></div>
-              <div class="agent-figure">
-                <div class="agent-face"><div class="pixel-agent">${agentsPixelArt({ id: 'market-scout' })}</div></div>
-              </div>
-              <div class="agent-bubble">Cargando escena pixel art</div>
-            </div>
-            <div class="agent-name">Loading...</div>
-            <div class="agent-role">Preparando agentes auxiliares</div>
-            <div class="agent-status">idle · ${escapeHtml(agentActivityLabel('reading'))}</div>
-            <div class="agent-task">Esperando snapshot del backend.</div>
-            <div class="agent-bar"><div style="width:40%"></div></div>
-            <div class="agent-foot"><span>energía</span><span>40%</span></div>
-          </article>
-        `;
+        grid.innerHTML = officeSceneTemplate([
+          { id: 'market-scout', name: 'Market Scout', activity: 'reading', accent: '#7dd3fc' },
+          { id: 'risk-warden', name: 'Risk Warden', activity: 'monitoring', accent: '#fbbf24' },
+          { id: 'execution-runner', name: 'Execution Runner', activity: 'typing', accent: '#c084fc' },
+          { id: 'report-scribe', name: 'Report Scribe', activity: 'typing', accent: '#60a5fa' },
+          { id: 'health-sentinel', name: 'Health Sentinel', activity: 'waiting', accent: '#36d399' },
+        ], 'Este es el código fuente de la oficina de agentes. Los personajes reflejan estado, espera, escritura y movimiento en tiempo real.');
       }
     }
 
@@ -1539,7 +2234,10 @@
         const warnings = Array.isArray(payload?.summary?.warnings) ? payload.summary.warnings : [];
         sub.textContent = `Listos: ${ready.length} | Activos: ${active.length} | Alertas: ${warnings.length}`;
       }
-      grid.innerHTML = agents.map(agentCardTemplate).join('');
+      grid.innerHTML = officeSceneTemplate(
+        agents,
+        'Este es el código fuente de la oficina de agentes. Los personajes reflejan estado, espera, escritura y movimiento en tiempo real.'
+      );
     }
 
     function buildSymbolPanels() {
