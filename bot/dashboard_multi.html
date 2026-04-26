@@ -1485,6 +1485,19 @@
       transform-origin: bottom center;
     }
 
+    .agent-unit .agent-chair {
+      position: absolute;
+      left: 50%;
+      top: 28px;
+      width: 22px;
+      height: 16px;
+      transform: translateX(-50%);
+      border-radius: 4px 4px 3px 3px;
+      background: linear-gradient(180deg, #d6a15d, #8c5a26);
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,0.18);
+      opacity: 0;
+    }
+
     .agent-unit .agent-head {
       position: absolute;
       left: 50%;
@@ -1609,6 +1622,10 @@
 
     .agent-unit.pose-seated .agent-arm.right {
       transform: rotate(-12deg);
+    }
+
+    .agent-unit.pose-seated .agent-chair {
+      opacity: 1;
     }
 
     .agent-unit.pose-typing .agent-sprite {
@@ -2150,17 +2167,16 @@
       const activity = String(agent?.activity || 'idle').toLowerCase();
       const pose = agentPoseClass(activity, status);
       const energy = Math.max(0, Math.min(100, Number(agent?.energy ?? 50)));
-      const showBubble = activity === 'typing' || activity === 'waiting' || activity === 'alert' || activity === 'monitoring';
       return `
         <div class="agent-unit ${pose}" title="${escapeHtml(agent?.name || 'Agent')} · ${escapeHtml(agentActivityLabel(activity))}" style="left:${layout.left}; top:${layout.top}; ${agentColorStyle(agent)}">
           <div class="agent-shadow"></div>
+          <div class="agent-chair"></div>
           <div class="agent-sprite">
             <div class="agent-head"><div class="pixel-agent">${agentsPixelArt(agent)}</div></div>
             <div class="agent-body"></div>
             <div class="agent-arms"><span class="agent-arm left"></span><span class="agent-arm right"></span></div>
             <div class="agent-legs"><span class="agent-leg left"></span><span class="agent-leg right"></span></div>
           </div>
-          ${showBubble ? `<div class="agent-bubble">${escapeHtml(agentBubbleText(activity))}</div>` : ''}
         </div>
       `;
     }
