@@ -410,20 +410,6 @@ def _run_healthcheck():
         },
     }
 
-    if issues:
-        activity_log.push(
-            "PORTFOLIO",
-            "warning",
-            f"Chequeo de salud: {len(issues)} desajuste(s) detectado(s)",
-            {"issues": issues, "counts": summary["counts"]},
-        )
-    else:
-        activity_log.push(
-            "PORTFOLIO",
-            "info",
-            "Chequeo de salud: estado limpio y reconciliado",
-            {"counts": summary["counts"]},
-        )
     return summary
 
 
