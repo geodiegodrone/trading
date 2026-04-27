@@ -2977,8 +2977,12 @@
         : Array.isArray(payload?.events)
           ? payload.events
           : [payload];
+      const nextBuffers = Object.fromEntries(Object.keys(activityBuffers).map((key) => [key, []]));
       items.forEach((item) => {
         const data = typeof item === 'string' ? { message: item } : (item || {});
+        if (String(data.symbol || '').toUpperCase() === 'PORTFOLIO' && /chequeo de salud/i.test(String(data.message || ''))) {
+          return;
+        }
         const symbol = shortSymbol(data.symbol || data.sym || data.ticker || data.market || '');
         const targets = activityBuffers[symbol] ? [symbol] : Object.keys(activityBuffers);
         const entry = {
@@ -2987,12 +2991,17 @@
           message: data.message || data.text || data.msg || data.event || JSON.stringify(data),
         };
         targets.forEach((key) => {
-          const buffer = activityBuffers[key];
+          const buffer = nextBuffers[key];
           if (!buffer) return;
-          buffer.unshift(entry);
-          while (buffer.length > 50) buffer.pop();
-          renderActivity(key);
+          const sig = `${entry.time}|${entry.kind}|${entry.message}`;
+          if (!buffer.some((prev) => `${prev.time}|${prev.kind}|${prev.message}` === sig)) {
+            buffer.push(entry);
+          }
         });
+      });
+      Object.keys(activityBuffers).forEach((key) => {
+        activityBuffers[key] = nextBuffers[key].slice(0, 50);
+        renderActivity(key);
       });
     }
 

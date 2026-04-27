@@ -42,7 +42,7 @@ def _load_json(path, default):
 
 def _recent_activity(symbol: str | None = None, limit: int = 20):
     try:
-        events = activity_log.get_recent(100)
+        events = [evt for evt in activity_log.get_recent(100) if not _is_healthcheck_event(evt)]
     except Exception:
         return []
     if symbol is None:
@@ -56,6 +56,17 @@ def _recent_activity(symbol: str | None = None, limit: int = 20):
         if len(filtered) >= limit:
             break
     return filtered
+
+
+def _is_healthcheck_event(event) -> bool:
+    try:
+        symbol = str(event.get("symbol") or "").upper()
+        message = str(event.get("message") or "").lower()
+        if symbol == "PORTFOLIO" and "chequeo de salud" in message:
+            return True
+    except Exception:
+        return False
+    return False
 
 
 def _as_float(value, default=0.0):
@@ -701,7 +712,7 @@ async def _refresh_cache():
         except Exception:
             pass
         try:
-            _cache["activity"] = activity_log.get_recent(50)
+            _cache["activity"] = [evt for evt in activity_log.get_recent(50) if not _is_healthcheck_event(evt)]
         except Exception:
             pass
         for sym in TAB_SYMBOLS:
