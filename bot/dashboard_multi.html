@@ -1819,12 +1819,15 @@
     </section>
 
     <section class="panel" id="agentsPanel">
-      <div class="agents-panel">
-        <div class="agents-hero">
-          <div class="agents-title" id="agentsTitle">Agentes auxiliares</div>
-          <div class="agents-sub" id="agentsSub">Supervisión pixel art de mercado, riesgo, salud y ejecución.</div>
+      <div style="padding:18px;border:1px solid rgba(255,255,255,.08);border-radius:20px;background:rgba(21,21,27,.92);box-shadow:0 18px 60px rgba(0,0,0,.35);">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding:12px 16px;border:1px solid rgba(255,255,255,.06);border-radius:14px;background:rgba(255,255,255,.02);">
+          <div>
+            <div style="font-size:18px;font-weight:800;letter-spacing:-.03em;" id="agentsTitle">Agentes auxiliares</div>
+            <div style="color:#8d93a6;font-size:13px;margin-top:4px;" id="agentsSub">Listos: 0 | Activos: 0 | Alertas: 0</div>
+          </div>
+          <div style="color:#36d399;font-size:12px;font-weight:700;letter-spacing:.08em;">BINANCE DEMO · LIVE</div>
         </div>
-        <div class="agents-grid" id="agentsGrid"></div>
+        <canvas id="agentsCanvas" style="width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.07);display:block;background:#0d1117;"></canvas>
       </div>
     </section>
 
@@ -2224,40 +2227,147 @@
       `;
     }
 
-    function buildAgentsPanel() {
-      const grid = document.getElementById('agentsGrid');
-      if (grid) {
-        grid.innerHTML = officeSceneTemplate([
-          { id: 'market-scout', name: 'Market Scout', activity: 'reading', accent: '#7dd3fc' },
-          { id: 'risk-warden', name: 'Risk Warden', activity: 'monitoring', accent: '#fbbf24' },
-          { id: 'execution-runner', name: 'Execution Runner', activity: 'typing', accent: '#c084fc' },
-          { id: 'report-scribe', name: 'Report Scribe', activity: 'typing', accent: '#60a5fa' },
-          { id: 'health-sentinel', name: 'Health Sentinel', activity: 'waiting', accent: '#36d399' },
-          { id: 'task-subagent', name: 'Sub-agent', activity: 'reading', accent: '#f472b6', palette: ['#1f2937', '#f472b6', '#fde68a'] },
-        ], 'Este es el código fuente de la oficina de agentes. Los personajes reflejan estado, espera, escritura y movimiento en tiempo real.');
+    // ── AGENTS CANVAS ─────────────────────────────────────────────────────────
+    const AGENT_DEFS = [
+      { id: 'market-scout',     name: 'Market Scout',     color: '#7dd3fc', col: 0, row: 0 },
+      { id: 'risk-warden',      name: 'Risk Warden',      color: '#fbbf24', col: 1, row: 0 },
+      { id: 'execution-runner', name: 'Execution Runner', color: '#c084fc', col: 2, row: 0 },
+      { id: 'health-sentinel',  name: 'Health Sentinel',  color: '#36d399', col: 0, row: 1 },
+      { id: 'report-scribe',    name: 'Report Scribe',    color: '#60a5fa', col: 1, row: 1 },
+    ];
+    const _agentLive = AGENT_DEFS.map(d => ({
+      ...d, activity: 'waiting', x: 0, y: 0, tx: 0, ty: 0,
+      bob: Math.random() * Math.PI * 2, deskX: 0, deskY: 0,
+    }));
+    let _agentsRaf = null;
+
+    function _drawDesk(ctx, x, y, color) {
+      ctx.fillStyle = '#6b3f1a'; ctx.beginPath(); ctx.roundRect(x, y, 100, 40, 5); ctx.fill();
+      ctx.fillStyle = '#1e2533'; ctx.fillRect(x + 30, y - 28, 40, 24);
+      ctx.fillStyle = '#0d1117'; ctx.fillRect(x + 33, y - 25, 34, 18);
+      ctx.fillStyle = color + '40'; ctx.fillRect(x + 33, y - 25, 34, 18);
+      ctx.fillStyle = '#3a2810'; ctx.fillRect(x + 8, y + 40, 7, 14); ctx.fillRect(x + 85, y + 40, 7, 14);
+      ctx.fillStyle = '#2a2d3a'; ctx.fillRect(x + 14, y + 8, 52, 7);
+    }
+
+    function _drawChar(ctx, x, y, color, activity, bob, t) {
+      const by = y + Math.sin(t * 0.003 + bob) * (activity === 'walking' ? 3 : 1);
+      ctx.globalAlpha = 0.18; ctx.fillStyle = '#000';
+      ctx.beginPath(); ctx.ellipse(x, by + 17, 9, 4, 0, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.fillStyle = color; ctx.fillRect(x - 7, by - 4, 14, 13);
+      ctx.fillStyle = '#f5c6a0'; ctx.fillRect(x - 5, by - 18, 10, 11);
+      ctx.fillStyle = '#3a2000'; ctx.fillRect(x - 5, by - 18, 10, 4);
+      ctx.fillStyle = '#1a1a2e'; ctx.fillRect(x - 2, by - 13, 2, 2); ctx.fillRect(x + 1, by - 13, 2, 2);
+      const ls = activity === 'walking' ? Math.sin(t * 0.018 + bob) * 5 : 0;
+      ctx.fillStyle = '#1e2533'; ctx.fillRect(x - 5 + ls, by + 9, 5, 9); ctx.fillRect(x + 1 - ls, by + 9, 5, 9);
+      const as = activity === 'typing' ? Math.sin(t * 0.025 + bob) * 5 : 0;
+      ctx.fillStyle = color; ctx.fillRect(x - 11, by - 3 + as, 4, 9); ctx.fillRect(x + 7, by - 3 - as, 4, 9);
+      if (activity === 'typing') {
+        ctx.fillStyle = 'rgba(255,255,255,.15)'; ctx.fillRect(x + 7, by - 26, 18, 9);
+        ctx.fillStyle = '#fff'; ctx.font = '7px monospace'; ctx.textAlign = 'left'; ctx.fillText('...', x + 9, by - 19);
+      } else if (activity === 'alert') {
+        ctx.fillStyle = '#f87171'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('!', x, by - 22);
+      } else if (activity === 'monitoring') {
+        ctx.fillStyle = '#fbbf24'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('●', x, by - 20);
       }
+      ctx.fillStyle = color; ctx.font = 'bold 9px Inter,sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(activity, x, by - 27); ctx.textAlign = 'left';
+    }
+
+    function _drawBg(ctx, W, H) {
+      const fy = H * 0.72;
+      ctx.fillStyle = '#0d1117'; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#11151f'; ctx.fillRect(0, 0, W, fy);
+      ctx.strokeStyle = 'rgba(255,255,255,.03)'; ctx.lineWidth = 1;
+      for (let tx = 0; tx < W; tx += 44) { ctx.beginPath(); ctx.moveTo(tx, fy); ctx.lineTo(tx, H); ctx.stroke(); }
+      for (let ty = fy; ty < H; ty += 32) { ctx.beginPath(); ctx.moveTo(0, ty); ctx.lineTo(W, ty); ctx.stroke(); }
+      ctx.fillStyle = 'rgba(255,255,255,.04)'; ctx.fillRect(0, fy, W, 2);
+      // clock
+      const cx2 = W / 2, cy2 = 26;
+      ctx.fillStyle = '#1e2533'; ctx.beginPath(); ctx.arc(cx2, cy2, 16, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#4a5060'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx2, cy2, 16, 0, Math.PI * 2); ctx.stroke();
+      const now2 = new Date();
+      const ha = ((now2.getHours() % 12) / 12 + now2.getMinutes() / 720) * Math.PI * 2 - Math.PI / 2;
+      const ma = (now2.getMinutes() / 60) * Math.PI * 2 - Math.PI / 2;
+      ctx.strokeStyle = '#cdd5e0'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx2, cy2); ctx.lineTo(cx2 + Math.cos(ha) * 8, cy2 + Math.sin(ha) * 8); ctx.stroke();
+      ctx.strokeStyle = '#36d399'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(cx2, cy2); ctx.lineTo(cx2 + Math.cos(ma) * 12, cy2 + Math.sin(ma) * 12); ctx.stroke();
+      // plants
+      ctx.fillStyle = '#15803d'; ctx.beginPath(); ctx.arc(18, fy - 30, 14, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(12, fy - 42, 10, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(26, fy - 44, 9, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#14532d'; ctx.fillRect(8, fy - 18, 20, 18);
+      ctx.fillStyle = '#15803d'; ctx.beginPath(); ctx.arc(W - 20, fy - 28, 12, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(W - 28, fy - 40, 9, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#14532d'; ctx.fillRect(W - 30, fy - 16, 20, 16);
+    }
+
+    function buildAgentsPanel() {
+      const canvas = document.getElementById('agentsCanvas');
+      if (!canvas) return;
+      const W = canvas.parentElement.clientWidth - 2;
+      const H = Math.max(400, Math.round(W * 0.4));
+      canvas.width = W; canvas.height = H; canvas.style.height = H + 'px';
+      const cols = 3, gapX = W / (cols + 1), gapY = H * 0.33;
+      _agentLive.forEach(a => {
+        a.deskX = gapX * (a.col + 0.7) - 50;
+        a.deskY = H * 0.38 + a.row * gapY;
+        a.tx = a.deskX + 50; a.ty = a.deskY + 58;
+        a.x = a.tx; a.y = a.ty;
+      });
+      if (_agentsRaf) cancelAnimationFrame(_agentsRaf);
+      let t = 0;
+      function loop() {
+        t++;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, W, H);
+        _drawBg(ctx, W, H);
+        _agentLive.forEach(a => { _drawDesk(ctx, a.deskX, a.deskY, a.color); });
+        _agentLive.forEach(a => {
+          const dx = a.tx - a.x, dy = a.ty - a.y;
+          if (Math.abs(dx) > 1 || Math.abs(dy) > 1) { a.x += dx * 0.05; a.y += dy * 0.05; }
+        });
+        [..._agentLive].sort((a, b) => a.y - b.y).forEach(a => {
+          _drawChar(ctx, Math.round(a.x), Math.round(a.y), a.color, a.activity, a.bob, t);
+        });
+        const sh = 38; ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(0, H - sh, W, sh);
+        const cw = W / _agentLive.length;
+        _agentLive.forEach((a, i) => {
+          const lcx = cw * i + cw / 2;
+          ctx.fillStyle = a.color; ctx.font = 'bold 10px Inter,sans-serif'; ctx.textAlign = 'center';
+          ctx.fillText(a.name, lcx, H - sh + 14);
+          ctx.fillStyle = '#8d93a6'; ctx.font = '9px Inter,sans-serif';
+          ctx.fillText(a.activity, lcx, H - sh + 26);
+        });
+        ctx.textAlign = 'left';
+        _agentsRaf = requestAnimationFrame(loop);
+      }
+      loop();
     }
 
     function renderAgents(payload) {
-      state.agents = payload;
-      const grid = document.getElementById('agentsGrid');
       const title = document.getElementById('agentsTitle');
       const sub = document.getElementById('agentsSub');
-      if (!grid) return;
-      const agents = Array.isArray(payload?.agents) ? payload.agents : [];
       if (title) title.textContent = payload?.title || 'Agentes auxiliares';
       if (sub) {
-        const ready = Array.isArray(payload?.summary?.ready_symbols) ? payload.summary.ready_symbols : [];
-        const active = Array.isArray(payload?.summary?.active_symbols) ? payload.summary.active_symbols : [];
-        const warnings = Array.isArray(payload?.summary?.warnings) ? payload.summary.warnings : [];
-        sub.textContent = `Listos: ${ready.length} | Activos: ${active.length} | Alertas: ${warnings.length}`;
+        const ready = payload?.summary?.ready_symbols?.length ?? 0;
+        const active = payload?.summary?.active_symbols?.length ?? 0;
+        const warn = payload?.summary?.warnings?.length ?? 0;
+        sub.textContent = `Listos: ${ready} | Activos: ${active} | Alertas: ${warn}`;
       }
-      const visualAgents = agents.slice();
-      visualAgents.push({ id: 'task-subagent', name: 'Sub-agent', activity: 'reading', accent: '#f472b6', palette: ['#1f2937', '#f472b6', '#fde68a'] });
-      grid.innerHTML = officeSceneTemplate(
-        visualAgents,
-        'Este es el código fuente de la oficina de agentes. Los personajes reflejan estado, espera, escritura y movimiento en tiempo real.'
-      );
+      (payload?.agents || []).forEach(inc => {
+        const a = _agentLive.find(x => x.id === inc.id);
+        if (!a) return;
+        a.activity = inc.activity || 'waiting';
+        const canvas = document.getElementById('agentsCanvas');
+        const W = canvas?.width || 800, H = canvas?.height || 400;
+        if (a.activity === 'typing' || a.activity === 'alert') {
+          a.tx = a.deskX + 50 + (Math.random() - .5) * 30; a.ty = a.deskY + 70;
+        } else if (a.activity === 'walking') {
+          a.tx = 80 + Math.random() * (W - 160); a.ty = H * 0.52 + Math.random() * H * 0.1;
+        } else {
+          a.tx = a.deskX + 50; a.ty = a.deskY + 58;
+        }
+      });
     }
 
     function buildSymbolPanels() {
