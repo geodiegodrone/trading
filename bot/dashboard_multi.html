@@ -1041,7 +1041,8 @@
     }
 
     .agent-card.state-active {
-      animation: floatCard 3.2s ease-in-out infinite;
+      animation: none;
+      transform: none;
     }
 
     .agent-card.state-active .pixel-agent {
@@ -1094,7 +1095,8 @@
     }
 
     .agent-card.state-busy {
-      animation: busyCard 0.9s ease-in-out infinite;
+      animation: none;
+      transform: none;
     }
 
     .agent-card.state-busy .pixel-agent {
@@ -1130,7 +1132,8 @@
     }
 
     .agent-card.state-warn {
-      animation: warnCard 0.5s ease-in-out infinite;
+      animation: none;
+      transform: none;
     }
 
     .agent-card.state-warn .pixel-agent {
@@ -1147,8 +1150,9 @@
     }
 
     .agent-card.state-idle {
-      animation: floatCard 4.8s ease-in-out infinite;
-      opacity: 0.88;
+      animation: none;
+      transform: none;
+      opacity: 0.96;
     }
 
     .agent-card.state-idle .pixel-agent {
@@ -2532,7 +2536,6 @@
       const activity = String(agent?.activity || 'idle');
       const energy = Math.max(0, Math.min(100, Number(agent?.energy ?? 0)));
       const energyLabel = energy >= 70 ? 'Alto' : energy >= 40 ? 'Medio' : 'Bajo';
-      const canRepair = Boolean(agent?.can_repair);
       return `
         <article class="${agentCardState(agent)}" style="--agent-accent:${agent?.accent || '#7dd3fc'}">
           <div class="agent-card-head">
@@ -2546,7 +2549,6 @@
           <div class="agent-card-metrics">
             ${agentMetricRows(agent)}
           </div>
-          ${canRepair ? '<button class="agent-repair-btn" data-agent-repair="true">Reparar ahora</button>' : ''}
           <div class="agent-bar"><div style="width:${energy}%"></div></div>
           <div class="agent-foot">
             <span>Actividad: ${escapeHtml(agentActivityLabel(activity))}</span>
@@ -2559,11 +2561,6 @@
     function buildAgentsPanel() {
       const grid = document.getElementById('agentsGrid');
       if (!grid) return;
-      grid.onclick = async (event) => {
-        const button = event.target.closest('[data-agent-repair="true"]');
-        if (!button) return;
-        await runRecoveryAction(button);
-      };
       const payload = state.agents || {};
       const agents = Array.isArray(payload?.agents) ? payload.agents : [];
       if (!agents.length) {
@@ -2576,34 +2573,6 @@
         return;
       }
       grid.innerHTML = agents.map((agent, index) => agentCardTemplate(agent, index)).join('');
-    }
-
-    async function runRecoveryAction(button) {
-      const original = button.textContent;
-      button.disabled = true;
-      button.textContent = 'Reparando...';
-      try {
-        const response = await fetch('/api/recovery', { method: 'POST' });
-        const payload = await response.json();
-        if (payload) {
-          if (payload.health) {
-            renderHealthReport(payload.health);
-          }
-          await loadLatestHealthCheck();
-          updateActivity({
-            symbol: 'PORTFOLIO',
-            kind: payload.ok ? 'info' : 'warn',
-            message: payload.ok
-              ? 'Recovery Agent: reparación conservadora completada'
-              : `Recovery Agent: reparación ejecutada con ${Array.isArray(payload.issues) ? payload.issues.length : 0} hallazgos`,
-          });
-        }
-      } catch (err) {
-        console.error('Recovery action failed', err);
-      } finally {
-        button.disabled = false;
-        button.textContent = original;
-      }
     }
 
     function renderAgents(payload) {

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -495,7 +496,7 @@ def _run_healthcheck():
     return summary
 
 
-def _run_recovery(force_refresh: bool = True):
+def _run_recovery(force_refresh: bool = True, auto: bool = False):
     import multi_bot
 
     started = datetime.now(timezone.utc).isoformat()
@@ -505,6 +506,7 @@ def _run_recovery(force_refresh: bool = True):
         "status": "running",
         "activity": "repairing",
         "force_refresh": bool(force_refresh),
+        "auto": bool(auto),
         "issues": [],
         "repairs": [],
         "counts": {},
@@ -530,6 +532,7 @@ def _run_recovery(force_refresh: bool = True):
             "before_issues": len(report.get("issues", [])),
             "after_issues": len(health.get("issues", [])) if isinstance(health, dict) else 0,
             "notes": [item.get("action") for item in report.get("repairs", []) if item.get("action")],
+            "auto": bool(auto),
         }
         report["ok"] = bool(health.get("ok")) if isinstance(health, dict) else False
         report["status"] = "done" if report["ok"] else "warn"
@@ -723,6 +726,7 @@ def _portfolio_payload():
 _cache: dict = {}
 _health_cache: dict = {"report": None}
 _recovery_cache: dict = {"report": None}
+_auto_recovery_state: dict = {"last_ts": 0.0}
 
 
 def _store_health_report(report: dict):
@@ -745,6 +749,33 @@ def _store_recovery_report(report: dict):
 def _get_recovery_report():
     report = _recovery_cache.get("report") or _cache.get("recovery")
     return report if isinstance(report, dict) else None
+
+
+def _recoverable_health_issues(report: dict) -> list[str]:
+    issues = []
+    for issue in report.get("issues", []) if isinstance(report, dict) else []:
+        text = str(issue).lower()
+        if (
+            "huérf" in text
+            or "huerf" in text
+            or "portfolio_state" in text
+            or "open_trade_id" in text
+            or "daily_balance" in text
+        ):
+            issues.append(str(issue))
+    return issues
+
+
+def _should_auto_recover(report: dict) -> bool:
+    if not isinstance(report, dict) or report.get("ok"):
+        return False
+    if report.get("recovery", {}).get("running"):
+        return False
+    if not _recoverable_health_issues(report):
+        return False
+    cooldown = max(60, int(os.getenv("RECOVERY_COOLDOWN_SEC", "300")))
+    last_ts = float(_auto_recovery_state.get("last_ts") or 0.0)
+    return (time.time() - last_ts) >= cooldown
 
 
 def _agents_payload():
@@ -811,9 +842,9 @@ def _agents_payload():
                     "Reparando registry, DB y snapshots desde Binance."
                     if recovery_running
                     else (
-                        "Listo para corregir desajustes del healthcheck con acciones conservadoras."
+                        "Auto-repara desajustes del healthcheck con acciones conservadoras."
                         if warnings
-                        else "Vigilando para reconstruir estado cuando aparezcan desajustes."
+                        else "Vigilando y listo para auto-reparar cuando aparezcan desajustes."
                     )
                 ),
                 "energy": 95 if recovery_running else 80 if warnings else 60,
@@ -822,11 +853,8 @@ def _agents_payload():
                 "metrics": [
                     {"label": "issues", "value": len(warnings)},
                     {"label": "repairs", "value": len(recovery_repairs)},
+                    {"label": "mode", "value": "auto"},
                 ],
-                "can_repair": True,
-                "action": "repair",
-                "action_label": "Reparar ahora",
-                "action_hint": "Reconcilia Binance, registry, DB y cache con una rutina conservadora.",
                 "status_hint": recovery_status,
             },
             {
@@ -914,6 +942,10 @@ async def _healthcheck_loop():
         try:
             report = await asyncio.to_thread(_run_healthcheck)
             _store_health_report(report)
+            if _should_auto_recover(report):
+                _auto_recovery_state["last_ts"] = time.time()
+                recovery_report = await asyncio.to_thread(_run_recovery, True, True)
+                _store_recovery_report(recovery_report)
         except Exception as exc:
             _store_health_report({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
