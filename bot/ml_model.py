@@ -30,6 +30,13 @@ FEATURE_ORDER = [
     "supertrend_direction",
     "volume_vs_ma20_ratio",
     "atr_pct",
+    "return_3_pct",
+    "return_5_pct",
+    "range_5_pct",
+    "body_avg_3_pct",
+    "volume_trend_3_ratio",
+    "close_pos_5",
+    "ema9_slope_3_pct",
 ]
 
 
@@ -75,6 +82,108 @@ def _feature_row(features: Dict[str, Any]) -> List[float]:
         except (TypeError, ValueError):
             row.append(0.0)
     return row
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        result = float(value)
+        if result != result:  # NaN check
+            return default
+        return result
+    except (TypeError, ValueError):
+        return default
+
+
+def _rows_from_history(history: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    if not history:
+        return []
+    cleaned: List[Dict[str, Any]] = []
+    for row in history:
+        if isinstance(row, dict):
+            cleaned.append(row)
+    return cleaned
+
+
+def snapshot_features(last: Dict[str, Any], history: Optional[List[Dict[str, Any]]] = None, cols: Optional[Dict[str, str]] = None) -> Dict[str, float]:
+    cols = cols or {}
+    rows = _rows_from_history(history)
+    if not rows and isinstance(last, dict):
+        rows = [last]
+
+    def _row_value(row: Dict[str, Any], key: str, default: float = 0.0) -> float:
+        return _safe_float(row.get(key), default)
+
+    def _close_from_end(offset: int) -> float:
+        if len(rows) <= offset:
+            return 0.0
+        return _row_value(rows[-(offset + 1)], "close")
+
+    def _slice_avg(field: str, count: int, start_offset: int = 0) -> float:
+        if len(rows) <= start_offset:
+            return 0.0
+        window = rows[max(0, len(rows) - (start_offset + count)):len(rows) - start_offset]
+        if not window:
+            return 0.0
+        values = [_row_value(r, field) for r in window]
+        values = [v for v in values if v != 0.0]
+        return sum(values) / len(values) if values else 0.0
+
+    ema_fast_key = cols.get("ema_fast", "ema9")
+    ema_slow_key = cols.get("ema_slow", "ema21")
+    ema_trend_key = cols.get("ema_trend", "ema200")
+    supertrend_key = cols.get("supertrend_dir", "supertrend_direction")
+
+    close = _row_value(last, "close")
+    open_ = _row_value(last, "open")
+    high = _row_value(last, "high")
+    low = _row_value(last, "low")
+    ema9 = _row_value(last, ema_fast_key)
+    ema21 = _row_value(last, ema_slow_key)
+    ema200 = _row_value(last, ema_trend_key)
+    volume = _row_value(last, "volume")
+    vol_ma20 = _row_value(last, "vol_ma20")
+    atr = _row_value(last, "atr")
+    rsi = _row_value(last, "rsi")
+    adx = _row_value(last, "adx")
+    supertrend_direction = _safe_float(last.get(supertrend_key), 0.0)
+
+    close_3 = _close_from_end(3)
+    close_5 = _close_from_end(5)
+    ema9_3 = _safe_float(rows[-4].get(ema_fast_key), ema9) if len(rows) >= 4 else ema9
+    recent_5 = rows[-5:] if len(rows) >= 5 else rows[:]
+    recent_3 = rows[-3:] if len(rows) >= 3 else rows[:]
+    prior_3 = rows[-6:-3] if len(rows) >= 6 else []
+    highest_5 = max((_row_value(row, "high") for row in recent_5), default=0.0)
+    lowest_5 = min((_row_value(row, "low") for row in recent_5), default=0.0)
+    avg_body_3 = sum(abs(_row_value(row, "close") - _row_value(row, "open")) / _row_value(row, "open") * 100.0
+                     for row in recent_3 if _row_value(row, "open")) / len(recent_3) if recent_3 else 0.0
+    avg_vol_3 = _slice_avg("volume", 3)
+    prev_avg_vol_3 = _slice_avg("volume", 3, start_offset=3)
+    vol_trend_3 = (avg_vol_3 / prev_avg_vol_3) if prev_avg_vol_3 else 0.0
+    close_pos_5 = ((close - lowest_5) / (highest_5 - lowest_5)) if highest_5 > lowest_5 else 0.0
+    ema9_slope_3 = ((ema9 - ema9_3) / ema9_3 * 100.0) if ema9_3 else 0.0
+
+    feature_map = {
+        "ema9_minus_ema21_pct": ((ema9 - ema21) / ema21 * 100.0) if ema21 else 0.0,
+        "rsi": rsi,
+        "price_vs_ema200_pct": ((close - ema200) / ema200 * 100.0) if ema200 else 0.0,
+        "candle_body_pct": abs(close - open_) / open_ * 100.0 if open_ else 0.0,
+        "adx": adx,
+        "supertrend_direction": supertrend_direction,
+        "volume_vs_ma20_ratio": (volume / vol_ma20) if vol_ma20 else 0.0,
+        "atr_pct": (atr / close * 100.0) if close else 0.0,
+        "return_3_pct": ((close - close_3) / close_3 * 100.0) if close_3 else 0.0,
+        "return_5_pct": ((close - close_5) / close_5 * 100.0) if close_5 else 0.0,
+        "range_5_pct": ((highest_5 - lowest_5) / close * 100.0) if close and highest_5 > lowest_5 else 0.0,
+        "body_avg_3_pct": avg_body_3,
+        "volume_trend_3_ratio": vol_trend_3,
+        "close_pos_5": close_pos_5,
+        "ema9_slope_3_pct": ema9_slope_3,
+    }
+    for key in ("return_3_pct", "return_5_pct", "range_5_pct", "body_avg_3_pct", "volume_trend_3_ratio", "close_pos_5", "ema9_slope_3_pct"):
+        if key in last and last.get(key) is not None:
+            feature_map[key] = _safe_float(last.get(key), feature_map[key])
+    return feature_map
 
 
 def _balanced_accuracy(y_true: List[int], y_prob: List[float], threshold: float = 0.5) -> float:
@@ -151,26 +260,7 @@ def label_triple_barrier(trades, profit_target: float = 0.02, stop_loss: float =
 
 
 def _trade_features(trade: Dict[str, Any]) -> Dict[str, float]:
-    ema9 = float(trade.get("ema9") or 0.0)
-    ema21 = float(trade.get("ema21") or 0.0)
-    rsi = float(trade.get("rsi") or 0.0)
-    ema200 = float(trade.get("ema200") or 0.0)
-    entry_price = float(trade.get("entry_price") or 0.0)
-    candle_body_pct = float(trade.get("candle_body_pct") or 0.0)
-    adx = float(trade.get("adx") or 0.0)
-    supertrend_direction = float(trade.get("supertrend_dir") or 0.0)
-    volume_ratio = float(trade.get("volume_ratio") or 0.0)
-    atr_pct = float(trade.get("atr_pct") or 0.0)
-    return {
-        "ema9_minus_ema21_pct": ((ema9 - ema21) / ema21 * 100.0) if ema21 else 0.0,
-        "rsi": rsi,
-        "price_vs_ema200_pct": ((entry_price - ema200) / ema200 * 100.0) if ema200 else 0.0,
-        "candle_body_pct": candle_body_pct,
-        "adx": adx,
-        "supertrend_direction": supertrend_direction,
-        "volume_vs_ma20_ratio": volume_ratio,
-        "atr_pct": atr_pct,
-    }
+    return snapshot_features(trade, [trade])
 
 
 def train(trades: list, symbol: Optional[str] = "BTCUSDT") -> None:

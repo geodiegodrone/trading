@@ -62,6 +62,13 @@ def _init_db() -> None:
                 supertrend_dir INTEGER,
                 volume_ratio REAL,
                 atr_pct REAL,
+                return_3_pct REAL,
+                return_5_pct REAL,
+                range_5_pct REAL,
+                body_avg_3_pct REAL,
+                volume_trend_3_ratio REAL,
+                close_pos_5 REAL,
+                ema9_slope_3_pct REAL,
                 qty REAL,
                 notional_usdt REAL,
                 result TEXT
@@ -74,6 +81,13 @@ def _init_db() -> None:
         _ensure_column(conn, "supertrend_dir", "ALTER TABLE trades ADD COLUMN supertrend_dir INTEGER")
         _ensure_column(conn, "volume_ratio", "ALTER TABLE trades ADD COLUMN volume_ratio REAL")
         _ensure_column(conn, "atr_pct", "ALTER TABLE trades ADD COLUMN atr_pct REAL")
+        _ensure_column(conn, "return_3_pct", "ALTER TABLE trades ADD COLUMN return_3_pct REAL")
+        _ensure_column(conn, "return_5_pct", "ALTER TABLE trades ADD COLUMN return_5_pct REAL")
+        _ensure_column(conn, "range_5_pct", "ALTER TABLE trades ADD COLUMN range_5_pct REAL")
+        _ensure_column(conn, "body_avg_3_pct", "ALTER TABLE trades ADD COLUMN body_avg_3_pct REAL")
+        _ensure_column(conn, "volume_trend_3_ratio", "ALTER TABLE trades ADD COLUMN volume_trend_3_ratio REAL")
+        _ensure_column(conn, "close_pos_5", "ALTER TABLE trades ADD COLUMN close_pos_5 REAL")
+        _ensure_column(conn, "ema9_slope_3_pct", "ALTER TABLE trades ADD COLUMN ema9_slope_3_pct REAL")
         _ensure_column(conn, "qty", "ALTER TABLE trades ADD COLUMN qty REAL")
         _ensure_column(conn, "notional_usdt", "ALTER TABLE trades ADD COLUMN notional_usdt REAL")
         _ensure_column(conn, "risk_usdt", "ALTER TABLE trades ADD COLUMN risk_usdt REAL")
@@ -105,6 +119,13 @@ def log_trade(
     supertrend_dir: int = 0,
     volume_ratio: float = 0.0,
     atr_pct: float = 0.0,
+    return_3_pct: float = 0.0,
+    return_5_pct: float = 0.0,
+    range_5_pct: float = 0.0,
+    body_avg_3_pct: float = 0.0,
+    volume_trend_3_ratio: float = 0.0,
+    close_pos_5: float = 0.0,
+    ema9_slope_3_pct: float = 0.0,
     qty: float = 0.0,
     notional_usdt: float = 0.0,
     risk_usdt: float = 0.0,
@@ -117,9 +138,11 @@ def log_trade(
             INSERT INTO trades (
                 ts, side, symbol, entry_price, exit_price, pnl, ema9, ema21, rsi,
                 ema200, candle_body_pct, adx, supertrend_dir, volume_ratio, atr_pct,
+                return_3_pct, return_5_pct, range_5_pct, body_avg_3_pct,
+                volume_trend_3_ratio, close_pos_5, ema9_slope_3_pct,
                 qty, notional_usdt, risk_usdt, r_multiple, exit_reason, result
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ts,
@@ -137,6 +160,13 @@ def log_trade(
                 int(supertrend_dir or 0),
                 float(volume_ratio or 0.0),
                 float(atr_pct or 0.0),
+                float(return_3_pct or 0.0),
+                float(return_5_pct or 0.0),
+                float(range_5_pct or 0.0),
+                float(body_avg_3_pct or 0.0),
+                float(volume_trend_3_ratio or 0.0),
+                float(close_pos_5 or 0.0),
+                float(ema9_slope_3_pct or 0.0),
                 float(qty or 0.0),
                 float(notional_usdt or 0.0),
                 float(risk_usdt or 0.0),
@@ -211,6 +241,8 @@ def get_all_trades(symbol: Optional[str] = None) -> List[Dict[str, Any]]:
     query = """
         SELECT id, ts, side, symbol, entry_price, exit_price, pnl, ema9, ema21, rsi,
                ema200, candle_body_pct, adx, supertrend_dir, volume_ratio, atr_pct,
+               return_3_pct, return_5_pct, range_5_pct, body_avg_3_pct,
+               volume_trend_3_ratio, close_pos_5, ema9_slope_3_pct,
                qty, notional_usdt, risk_usdt, r_multiple, exit_reason, result
         FROM trades
     """

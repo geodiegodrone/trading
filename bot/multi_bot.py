@@ -289,6 +289,8 @@ def _register_live_position(symbol, live_pos, cfg, balance):
             return None
         last = df.iloc[-1].to_dict()
         cols = df.attrs.get("indicator_cols", {})
+        feature_context = ml_model.snapshot_features(last, df.tail(10).to_dict("records"), cols)
+        trade_log.set_trade_context(feature_context.get("candle_body_pct", 0.0))
         side = live_pos.get("side", "Buy")
         qty = _position_size(live_pos)
         atr_estimate = _as_float(last.get("atr"))
@@ -311,6 +313,13 @@ def _register_live_position(symbol, live_pos, cfg, balance):
                 qty=qty,
                 notional_usdt=qty * price,
                 risk_usdt=qty * sl_dist,
+                return_3_pct=feature_context.get("return_3_pct", 0.0),
+                return_5_pct=feature_context.get("return_5_pct", 0.0),
+                range_5_pct=feature_context.get("range_5_pct", 0.0),
+                body_avg_3_pct=feature_context.get("body_avg_3_pct", 0.0),
+                volume_trend_3_ratio=feature_context.get("volume_trend_3_ratio", 0.0),
+                close_pos_5=feature_context.get("close_pos_5", 0.0),
+                ema9_slope_3_pct=feature_context.get("ema9_slope_3_pct", 0.0),
             )
         except TypeError:
             trade_id = trade_log.log_trade(
@@ -321,6 +330,13 @@ def _register_live_position(symbol, live_pos, cfg, balance):
                 _as_float(last.get("rsi")),
                 _as_float(last.get(cols.get("ema_trend", "ema200"))),
                 symbol=symbol,
+                return_3_pct=feature_context.get("return_3_pct", 0.0),
+                return_5_pct=feature_context.get("return_5_pct", 0.0),
+                range_5_pct=feature_context.get("range_5_pct", 0.0),
+                body_avg_3_pct=feature_context.get("body_avg_3_pct", 0.0),
+                volume_trend_3_ratio=feature_context.get("volume_trend_3_ratio", 0.0),
+                close_pos_5=feature_context.get("close_pos_5", 0.0),
+                ema9_slope_3_pct=feature_context.get("ema9_slope_3_pct", 0.0),
             )
         return {
             "side": side,
@@ -752,6 +768,8 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt):
             logger.warning("open_short failed for %s: %s", symbol, exc)
             return
     cols = df.attrs.get("indicator_cols", {})
+    feature_context = ml_model.snapshot_features(last, df.tail(10).to_dict("records"), cols)
+    trade_log.set_trade_context(feature_context.get("candle_body_pct", 0.0))
     trade_id = None
     try:
         trade_id = trade_log.log_trade(
@@ -765,6 +783,13 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt):
             qty=qty,
             notional_usdt=qty * price,
             risk_usdt=qty * sl_dist,
+            return_3_pct=feature_context.get("return_3_pct", 0.0),
+            return_5_pct=feature_context.get("return_5_pct", 0.0),
+            range_5_pct=feature_context.get("range_5_pct", 0.0),
+            body_avg_3_pct=feature_context.get("body_avg_3_pct", 0.0),
+            volume_trend_3_ratio=feature_context.get("volume_trend_3_ratio", 0.0),
+            close_pos_5=feature_context.get("close_pos_5", 0.0),
+            ema9_slope_3_pct=feature_context.get("ema9_slope_3_pct", 0.0),
         )
     except TypeError:
         trade_id = trade_log.log_trade(
@@ -775,6 +800,13 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt):
             _as_float(last.get("rsi")),
             _as_float(last.get(cols.get("ema_trend", "ema200"))),
             symbol=symbol,
+            return_3_pct=feature_context.get("return_3_pct", 0.0),
+            return_5_pct=feature_context.get("return_5_pct", 0.0),
+            range_5_pct=feature_context.get("range_5_pct", 0.0),
+            body_avg_3_pct=feature_context.get("body_avg_3_pct", 0.0),
+            volume_trend_3_ratio=feature_context.get("volume_trend_3_ratio", 0.0),
+            close_pos_5=feature_context.get("close_pos_5", 0.0),
+            ema9_slope_3_pct=feature_context.get("ema9_slope_3_pct", 0.0),
         )
     state = _portfolio_state()
     state.setdefault("open_positions", {})[symbol] = {
@@ -899,6 +931,7 @@ def run_symbol(symbol, cfg, shared_stop_event):
                 time.sleep(5)
                 continue
             last = df.iloc[-1].to_dict()
+            feature_context = ml_model.snapshot_features(last, df.tail(10).to_dict("records"), df.attrs.get("indicator_cols", {}))
             signal = evaluate_signal(last, df, cfg)
             cols = df.attrs.get("indicator_cols", {})
             ema_fast = _as_float(last.get(cols.get("ema_fast", "ema9")))
@@ -913,14 +946,7 @@ def run_symbol(symbol, cfg, shared_stop_event):
                 time.sleep(5)
                 continue
             features = {
-                "ema9_minus_ema21_pct": (ema_fast - ema_slow) / ema_slow * 100 if ema_slow else 0.0,
-                "rsi": rsi,
-                "price_vs_ema200_pct": ((_as_float(last.get("close")) - ema_trend) / ema_trend * 100) if ema_trend else 0.0,
-                "candle_body_pct": abs(_as_float(last.get("close")) - _as_float(last.get("open"))) / _as_float(last.get("open")) * 100 if _as_float(last.get("open")) else 0.0,
-                "adx": adx,
-                "supertrend_direction": int(_as_float(last.get(cols.get("supertrend_dir", "SUPERTd_14_3.5")))),
-                "volume_vs_ma20_ratio": _as_float(last.get("volume")) / _as_float(last.get("vol_ma20")) if _as_float(last.get("vol_ma20")) else 0.0,
-                "atr_pct": _as_float(last.get("atr")) / _as_float(last.get("close")) * 100 if _as_float(last.get("close")) else 0.0,
+                **feature_context,
             }
             confidence = _ml_confidence(features, symbol)
             ml_threshold = float(cfg.get("ml_threshold", 0.55))

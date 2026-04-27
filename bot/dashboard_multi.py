@@ -598,16 +598,7 @@ def _build_symbol_payload(symbol):
         ml_info = {}
     ml_validation_accuracy = _as_float(ml_info.get("validation_accuracy"), 0.0)
     ml_validation_trades = int(ml_info.get("validation_trades") or 0)
-    features = {
-        "ema9_minus_ema21_pct": ((_as_float(last.get(cols.get("ema_fast", "ema9"))) - _as_float(last.get(cols.get("ema_slow", "ema21")))) / _as_float(last.get(cols.get("ema_slow", "ema21"))) * 100) if _as_float(last.get(cols.get("ema_slow", "ema21"))) else 0.0,
-        "rsi": _as_float(last.get("rsi")),
-        "price_vs_ema200_pct": ((price - _as_float(last.get(cols.get("ema_trend", "ema200")))) / _as_float(last.get(cols.get("ema_trend", "ema200"))) * 100) if _as_float(last.get(cols.get("ema_trend", "ema200"))) else 0.0,
-        "candle_body_pct": abs(_as_float(last.get("close")) - _as_float(last.get("open"))) / _as_float(last.get("open")) * 100 if _as_float(last.get("open")) else 0.0,
-        "adx": _as_float(last.get("adx")),
-        "supertrend_direction": int(_as_float(last.get(cols.get("supertrend_dir", "supertrend_direction")))) if last.get(cols.get("supertrend_dir", "supertrend_direction")) is not None else 0,
-        "volume_vs_ma20_ratio": _as_float(last.get("volume")) / _as_float(last.get("vol_ma20")) if _as_float(last.get("vol_ma20")) else 0.0,
-        "atr_pct": _as_float(last.get("atr")) / price * 100 if price else 0.0,
-    }
+    features = ml_model.snapshot_features(last, df.tail(10).to_dict("records"), cols)
     ml_ready = False
     ml_confidence = 0.5
     try:
