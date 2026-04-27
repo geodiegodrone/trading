@@ -587,6 +587,11 @@ def _build_symbol_payload(symbol):
     balance = _get_balance()
     stats = trade_log.get_stats(symbol)
     symbol_trades = trade_log.get_all_trades(symbol)
+    try:
+        ml_training_trades = len(ml_model.label_closed_trades(symbol_trades))
+    except Exception:
+        ml_training_trades = int(stats.get("total", 0))
+    ml_min_train_trades = int(getattr(ml_model, "MIN_TRAIN_TRADES", 20))
     features = {
         "ema9_minus_ema21_pct": ((_as_float(last.get(cols.get("ema_fast", "ema9"))) - _as_float(last.get(cols.get("ema_slow", "ema21")))) / _as_float(last.get(cols.get("ema_slow", "ema21"))) * 100) if _as_float(last.get(cols.get("ema_slow", "ema21"))) else 0.0,
         "rsi": _as_float(last.get("rsi")),
@@ -634,6 +639,8 @@ def _build_symbol_payload(symbol):
         "worst_trade": _as_float(stats.get("worst")),
         "ml_ready": ml_ready,
         "ml_confidence": ml_confidence,
+        "ml_training_trades": ml_training_trades,
+        "ml_min_train_trades": ml_min_train_trades,
         "trade_stats": stats,
     }
     kpis["pnl_total"] = kpis["pnl_realized"] + kpis["pnl_unrealized"]

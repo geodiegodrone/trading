@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = Path(__file__).resolve().parent
 LEGACY_MODEL_PATH = BASE_DIR / "model.pkl"
-MIN_TRAIN_TRADES = int(os.getenv("ML_MIN_TRAIN_TRADES", "8"))
+MIN_TRAIN_TRADES = int(os.getenv("ML_MIN_TRAIN_TRADES", "20"))
 _TRAIN_LOCK = threading.Lock()
 
 FEATURE_ORDER = [

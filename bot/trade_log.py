@@ -86,6 +86,14 @@ def _init_db() -> None:
 _init_db()
 
 
+def _is_reconciled_trade(trade: Dict[str, Any]) -> bool:
+    return str(trade.get("result") or "").upper() == "RECONCILED"
+
+
+def _is_real_closed_trade(trade: Dict[str, Any]) -> bool:
+    return trade.get("pnl") is not None and not _is_reconciled_trade(trade)
+
+
 def log_trade(
     side: str,
     entry_price: float,
@@ -218,7 +226,8 @@ def get_all_trades(symbol: Optional[str] = None) -> List[Dict[str, Any]]:
 
 def get_stats(symbol: Optional[str] = None) -> Dict[str, Any]:
     trades = get_all_trades(symbol=symbol)
-    closed = [trade for trade in trades if trade.get("pnl") is not None]
+    closed = [trade for trade in trades if _is_real_closed_trade(trade)]
+    reconciled = [trade for trade in trades if trade.get("pnl") is not None and _is_reconciled_trade(trade)]
     total = len(closed)
     wins = sum(1 for trade in closed if float(trade.get("pnl") or 0.0) > 0)
     losses = sum(1 for trade in closed if float(trade.get("pnl") or 0.0) < 0)
@@ -249,4 +258,6 @@ def get_stats(symbol: Optional[str] = None) -> Dict[str, Any]:
         "avg_r": avg_r,
         "best_r": best_r,
         "worst_r": worst_r,
+        "reconciled": len(reconciled),
+        "all_closed": len(closed) + len(reconciled),
     }

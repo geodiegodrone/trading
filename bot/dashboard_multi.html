@@ -2671,6 +2671,8 @@
       const worstTrade = Number(kpis?.worst_trade ?? 0);
       const mlReady = Boolean(kpis?.ml_ready);
       const mlConfidence = Number(kpis?.ml_confidence ?? 0.5);
+      const mlTrainingTrades = Number(kpis?.ml_training_trades ?? 0);
+      const mlMinTrainTrades = Number(kpis?.ml_min_train_trades ?? 20);
       const tradeStats = kpis?.trade_stats || {};
       const statsTotal = Number(tradeStats.total ?? tradeCount);
       const statsWins = Number(tradeStats.wins ?? wins);
@@ -2704,9 +2706,9 @@
         document.getElementById(id(symbol, 'kpiMlStatus')).style.color = mlConfidence >= 0.55 ? 'var(--green)' : 'var(--yellow)';
         setText('kpiMlHint', `Confidence: ${mlConfidence.toFixed(2)}`);
       } else {
-        setText('kpiMlStatus', `Training (${Math.min(8, statsTotal)}/8 trades)`);
+        setText('kpiMlStatus', `Training (${Math.min(mlTrainingTrades, mlMinTrainTrades)}/${mlMinTrainTrades} trades)`);
         document.getElementById(id(symbol, 'kpiMlStatus')).style.color = 'var(--yellow)';
-        setText('kpiMlHint', 'Waiting for 8 closed trades');
+        setText('kpiMlHint', `Waiting for ${mlMinTrainTrades} real closed trades`);
       }
       setText('kpiStats', hasClosedTrades ? `${statsWinRate.toFixed(1)}%` : '--');
       document.getElementById(id(symbol, 'kpiStats')).style.color = statsWinRate >= 60 ? 'var(--green)' : statsWinRate >= 40 ? 'var(--yellow)' : 'var(--red)';
