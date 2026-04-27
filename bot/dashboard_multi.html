@@ -1913,6 +1913,7 @@
             <div class="symbol-header">
               <div class="symbol-title"><span class="accent-dot"></span>${meta.label}</div>
               <div class="symbol-meta">
+                <span id="updated-${symbol}" class="status-tag empty" style="text-transform:none; letter-spacing:0.04em;">--</span>
                 <span id="status-${symbol}" class="status-tag empty">SIN POSICIÓN</span>
               </div>
             </div>
@@ -2882,6 +2883,8 @@
     function updateSymbol(symbol, d) {
       state.symbols[symbol].snapshot = d;
       if (d?.events) updateActivity(d.events);
+      const updatedEl = document.getElementById(`updated-${symbol}`);
+      if (updatedEl) updatedEl.textContent = d?.updated_label || '--';
       setMarketSnapshot(symbol, d || {});
       setSignal(symbol, d.signal);
       setPosition(symbol, d.position);

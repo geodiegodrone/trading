@@ -430,6 +430,7 @@ def _build_symbol_payload(symbol):
     df = _fetch_candles(symbol, cfg_timeframe)
     df = _compute_indicators(df, cfg)
     events = _recent_activity(symbol, 20)
+    updated_at = datetime.now(timezone.utc)
     if df.empty or len(df) < 50:
         return {
             "price": 0.0,
@@ -443,6 +444,8 @@ def _build_symbol_payload(symbol):
             "indicators": {},
             "trade_gate": {"status": "SIN DATOS", "reason": "Esperando velas suficientes", "ready": False},
             "events": events,
+            "updated_at": updated_at.isoformat(),
+            "updated_label": updated_at.strftime("%H:%M:%S UTC"),
         }
     last = df.iloc[-1].to_dict()
     cols = df.attrs.get("indicator_cols", {})
@@ -535,6 +538,8 @@ def _build_symbol_payload(symbol):
         "indicators": indicators,
         "trade_gate": trade_gate,
         "events": events,
+        "updated_at": updated_at.isoformat(),
+        "updated_label": updated_at.strftime("%H:%M:%S UTC"),
     }
 
 
@@ -720,7 +725,7 @@ async def _refresh_cache():
                 _cache[sym] = await asyncio.to_thread(_build_symbol_payload, sym)
             except Exception:
                 pass
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
 
 
 async def _healthcheck_loop():
@@ -773,7 +778,9 @@ async def ws_portfolio(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            await websocket.send_json(_cache.get("portfolio", {}))
+            payload = await asyncio.to_thread(_portfolio_payload)
+            _cache["portfolio"] = payload
+            await websocket.send_json(payload)
             await asyncio.sleep(1)
     except Exception:
         pass
@@ -784,7 +791,9 @@ async def ws_activity(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            await websocket.send_json(_cache.get("activity", []))
+            payload = [evt for evt in activity_log.get_recent(50) if not _is_healthcheck_event(evt)]
+            _cache["activity"] = payload
+            await websocket.send_json(payload)
             await asyncio.sleep(1)
     except Exception:
         pass
@@ -795,7 +804,9 @@ async def ws_agents(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            await websocket.send_json(_cache.get("agents", _agents_payload()))
+            payload = await asyncio.to_thread(_agents_payload)
+            _cache["agents"] = payload
+            await websocket.send_json(payload)
             await asyncio.sleep(2)
     except Exception:
         pass
@@ -806,7 +817,9 @@ async def ws_symbol(websocket: WebSocket, symbol: str):
     await websocket.accept()
     try:
         while True:
-            await websocket.send_json(_cache.get(symbol, {}))
+            payload = await asyncio.to_thread(_build_symbol_payload, symbol)
+            _cache[symbol] = payload
+            await websocket.send_json(payload)
             await asyncio.sleep(1)
     except Exception:
         pass
