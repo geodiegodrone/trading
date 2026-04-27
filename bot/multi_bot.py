@@ -233,6 +233,115 @@ def _open_trade_rows(symbol):
     return [trade for trade in trades if trade.get("pnl") is None and str(trade.get("result") or "").upper() == "OPEN"]
 
 
+def _local_position(symbol):
+    try:
+        state = _portfolio_state()
+        return (state.get("open_positions", {}) or {}).get(symbol)
+    except Exception:
+        return None
+
+
+def _position_from_trade_row(symbol, trade):
+    if not trade:
+        return None
+    entry = _as_float(trade.get("entry_price"))
+    size = _as_float(trade.get("qty"))
+    if size <= 0 and entry > 0:
+        notional = _as_float(trade.get("notional_usdt"))
+        if notional > 0:
+            size = notional / entry
+    if entry <= 0 or size <= 0:
+        return None
+    side = str(trade.get("side") or "Buy")
+    risk_usdt = _as_float(trade.get("risk_usdt"))
+    stop_distance = risk_usdt / size if risk_usdt > 0 and size > 0 else max(entry * 0.005, 0.0)
+    if side.lower() == "buy":
+        sl = entry - stop_distance
+        tp = entry + stop_distance * 2.0
+    else:
+        sl = entry + stop_distance
+        tp = entry - stop_distance * 2.0
+    opened_ts = trade.get("ts") or datetime.now(timezone.utc).isoformat()
+    return {
+        "side": side,
+        "size": size,
+        "entry_price": entry,
+        "sl": sl,
+        "tp": tp,
+        "trade_id": trade.get("id"),
+        "opened_ts": opened_ts,
+        "atr_stop_distance": stop_distance,
+        "risk_usdt": risk_usdt if risk_usdt > 0 else size * stop_distance,
+        "peak_price": entry,
+        "trough_price": entry,
+        "breakeven_moved": False,
+        "trail_stop": sl,
+    }
+
+
+def _register_live_position(symbol, live_pos, cfg, balance):
+    price = _as_float(live_pos.get("entry_price"))
+    if price <= 0:
+        return None
+    try:
+        df = _compute_indicators(_fetch_candles(symbol, cfg["timeframe"]), cfg)
+        if df.empty:
+            return None
+        last = df.iloc[-1].to_dict()
+        cols = df.attrs.get("indicator_cols", {})
+        side = live_pos.get("side", "Buy")
+        qty = _position_size(live_pos)
+        atr_estimate = _as_float(last.get("atr"))
+        sl_dist = atr_estimate * float(cfg.get("atr_mult", 1.5)) if atr_estimate > 0 else max(price * 0.005, 0.0)
+        if side.lower() == "buy":
+            sl = price - sl_dist
+            tp = price + sl_dist * 2.0
+        else:
+            sl = price + sl_dist
+            tp = price - sl_dist * 2.0
+        try:
+            trade_id = trade_log.log_trade(
+                side,
+                price,
+                _as_float(last.get(cols.get("ema_fast", "ema9"))),
+                _as_float(last.get(cols.get("ema_slow", "ema21"))),
+                _as_float(last.get("rsi")),
+                _as_float(last.get(cols.get("ema_trend", "ema200"))),
+                symbol=symbol,
+                qty=qty,
+                notional_usdt=qty * price,
+                risk_usdt=qty * sl_dist,
+            )
+        except TypeError:
+            trade_id = trade_log.log_trade(
+                side,
+                price,
+                _as_float(last.get(cols.get("ema_fast", "ema9"))),
+                _as_float(last.get(cols.get("ema_slow", "ema21"))),
+                _as_float(last.get("rsi")),
+                _as_float(last.get(cols.get("ema_trend", "ema200"))),
+                symbol=symbol,
+            )
+        return {
+            "side": side,
+            "size": qty,
+            "entry_price": price,
+            "sl": sl,
+            "tp": tp,
+            "trade_id": trade_id,
+            "opened_ts": datetime.now(timezone.utc).isoformat(),
+            "atr_stop_distance": sl_dist,
+            "risk_usdt": qty * sl_dist,
+            "peak_price": price,
+            "trough_price": price,
+            "breakeven_moved": False,
+            "trail_stop": sl,
+        }
+    except Exception as exc:
+        logger.warning("Failed to register live position for %s: %s", symbol, exc)
+        return None
+
+
 def _rebuild_position_from_exchange(symbol, cfg, balance):
     pos = _get_current_position(symbol)
     if not pos:
@@ -286,16 +395,43 @@ def reconcile_state():
         for symbol in SYMBOLS:
             live_pos = _get_current_position(symbol)
             open_rows = _open_trade_rows(symbol)
+            local_pos = current_positions.get(symbol)
+            registry_trade_id = _open_trade_registry().get(symbol)
+            open_rows_sorted = sorted(open_rows, key=lambda row: int(row.get("id") or 0))
             if live_pos:
                 rebuilt = _rebuild_position_from_exchange(symbol, _get_symbol_config(symbol), balance)
+                active_trade_id = None
                 if rebuilt:
+                    active_trade_id = rebuilt.get("trade_id")
+                    if (
+                        active_trade_id is None
+                        and not open_rows_sorted
+                        and (local_pos is None or local_pos.get("trade_id") is None)
+                        and registry_trade_id is None
+                    ):
+                        synthetic = _register_live_position(symbol, live_pos, _get_symbol_config(symbol), balance)
+                        if synthetic:
+                            rebuilt = synthetic
+                            active_trade_id = synthetic.get("trade_id")
                     reconciled_positions[symbol] = rebuilt
                     trade_id = rebuilt.get("trade_id")
                     if trade_id is not None:
                         reconciled_registry[symbol] = trade_id
-                    active_trade_id = trade_id
                 else:
-                    active_trade_id = None
+                    if (
+                        not open_rows_sorted
+                        and (local_pos is None or local_pos.get("trade_id") is None)
+                        and registry_trade_id is None
+                    ):
+                        synthetic = _register_live_position(symbol, live_pos, _get_symbol_config(symbol), balance)
+                        if synthetic:
+                            reconciled_positions[symbol] = synthetic
+                            reconciled_registry[symbol] = synthetic.get("trade_id")
+                            active_trade_id = synthetic.get("trade_id")
+                    if active_trade_id is None and local_pos and local_pos.get("trade_id") is not None:
+                        active_trade_id = int(local_pos.get("trade_id"))
+                    if active_trade_id is None and registry_trade_id is not None:
+                        active_trade_id = int(registry_trade_id)
                 for row in open_rows:
                     row_id = row.get("id")
                     if row_id is None:
@@ -323,9 +459,29 @@ def reconcile_state():
                         "trail_stop": _as_float(live_pos.get("entry_price")),
                     }
             else:
-                for row in open_rows:
+                active_trade_id = None
+                recovered = None
+                if local_pos:
+                    recovered = dict(local_pos)
+                    active_trade_id = int(recovered.get("trade_id")) if recovered.get("trade_id") is not None else None
+                if active_trade_id is None and registry_trade_id is not None:
+                    active_trade_id = int(registry_trade_id)
+                if recovered is None and open_rows_sorted:
+                    recovered = _position_from_trade_row(symbol, open_rows_sorted[-1])
+                    if active_trade_id is None and open_rows_sorted[-1].get("id") is not None:
+                        active_trade_id = int(open_rows_sorted[-1]["id"])
+                if recovered:
+                    if active_trade_id is not None:
+                        recovered["trade_id"] = int(active_trade_id)
+                        reconciled_registry[symbol] = int(active_trade_id)
+                    elif recovered.get("trade_id") is not None:
+                        reconciled_registry[symbol] = int(recovered["trade_id"])
+                    reconciled_positions[symbol] = recovered
+                for row in open_rows_sorted:
                     row_id = row.get("id")
                     if row_id is None:
+                        continue
+                    if active_trade_id is not None and int(row_id) == int(active_trade_id):
                         continue
                     try:
                         trade_log.reconcile_trade(int(row_id), float(row.get("entry_price") or 0.0))
@@ -460,7 +616,7 @@ def _get_current_position(symbol):
     try:
         return binance_broker.get_position(symbol)
     except Exception:
-        return None
+        return _local_position(symbol)
 
 
 def _close_trade(symbol, position, exit_price, reason="EXIT"):

@@ -80,6 +80,41 @@ def _portfolio_state():
     return _load_json(PORTFOLIO_FILE, {"open_positions": {}, "total_risk_pct": 0.0})
 
 
+def _local_position(symbol: str):
+    state = _portfolio_state()
+    return (state.get("open_positions", {}) or {}).get(symbol)
+
+
+def _position_snapshot(symbol: str, price: float | None = None):
+    try:
+        pos = binance_broker.get_position(symbol)
+        if pos:
+            return {
+                "position": {
+                    "side": pos.get("side"),
+                    "size": pos.get("size"),
+                    "entry_price": pos.get("entry_price"),
+                    "unrealisedPnl": pos.get("unrealised_pnl", 0.0),
+                    "_source": "binance",
+                },
+                "source": "binance",
+                "error": None,
+            }
+        return {"position": None, "source": "binance", "error": None}
+    except Exception as exc:
+        local = _local_position(symbol)
+        if local:
+            recovered = dict(local)
+            if price is not None:
+                recovered["unrealisedPnl"] = _unrealized_pnl_from_position(recovered, price)
+            else:
+                recovered["unrealisedPnl"] = _as_float(recovered.get("unrealisedPnl"), 0.0)
+            recovered["_source"] = "local"
+            recovered["_exchange_error"] = str(exc)
+            return {"position": recovered, "source": "local", "error": str(exc)}
+        return {"position": None, "source": "error", "error": str(exc)}
+
+
 def _open_trade_registry():
     return _load_json(OPEN_TRADE_FILE, {})
 
@@ -152,18 +187,7 @@ def _compute_indicators(df, cfg):
     }
     return df
 def _position(symbol):
-    try:
-        pos = binance_broker.get_position(symbol)
-        if pos:
-            return {
-                "side": pos.get("side"),
-                "size": pos.get("size"),
-                "entry_price": pos.get("entry_price"),
-                "unrealisedPnl": pos.get("unrealised_pnl", 0.0),
-            }
-    except Exception:
-        pass
-    return None
+    return _position_snapshot(symbol).get("position")
 
 
 def _kelly_fraction():
@@ -201,6 +225,19 @@ def _daily_loss_pct(balance):
     if balance >= start:
         return 0.0
     return min(((start - balance) / start) / 0.03 * 100.0, 100.0)
+
+
+def _unrealized_pnl_from_position(position, price):
+    if not position or price <= 0:
+        return 0.0
+    entry = _as_float(position.get("entry_price"))
+    size = _as_float(position.get("size") or position.get("qty"))
+    if entry <= 0 or size <= 0:
+        return _as_float(position.get("unrealisedPnl"), 0.0)
+    side = str(position.get("side") or "Buy").lower()
+    if side == "buy":
+        return (price - entry) * size
+    return (entry - price) * size
 
 
 def _signal_from_last(last, cfg=None):
@@ -304,25 +341,39 @@ def _trade_gate_state(last, cfg, position=None, ml_ready=False, ml_confidence=0.
     return {"status": "LISTO PARA OPERAR", "reason": f"Señal {signal} confirmada por filtros", "ready": True}
 
 
-def _health_issues_for_symbol(live_pos, local_pos, registry_trade_id, open_rows):
+def _health_issues_for_symbol(exchange_pos, local_pos, registry_trade_id, open_rows, exchange_error=None):
     issues = []
-    if live_pos and not local_pos:
+    active_trade_id = registry_trade_id
+    if active_trade_id is None and local_pos and local_pos.get("trade_id") is not None:
+        try:
+            active_trade_id = int(local_pos.get("trade_id"))
+        except Exception:
+            active_trade_id = registry_trade_id
+    if exchange_pos and not local_pos:
         issues.append("Binance tiene posicion pero portfolio_state no")
-    if local_pos and not live_pos:
+    if local_pos and not exchange_pos and exchange_error is None:
         issues.append("portfolio_state tiene posicion pero Binance no")
-    if live_pos and registry_trade_id is None:
+    if exchange_pos and registry_trade_id is None:
         issues.append("Falta registro open_trade_id")
-    if not live_pos and open_rows:
-        issues.append("Existen trades abiertos huerfanos")
-    if live_pos and open_rows and len(open_rows) > 1:
-        issues.append("Hay mas de un trade abierto para el mismo simbolo")
-    if local_pos and registry_trade_id is None:
+    if local_pos and registry_trade_id is None and active_trade_id is None:
         issues.append("portfolio_state no esta reflejado en el registry")
-    if live_pos and registry_trade_id is not None:
+    orphan_rows = []
+    for row in open_rows:
+        row_id = row.get("id")
+        if row_id is None:
+            orphan_rows.append(row)
+            continue
+        if active_trade_id is None or int(row_id) != int(active_trade_id):
+            orphan_rows.append(row)
+    if orphan_rows:
+        issues.append(f"Existen {len(orphan_rows)} trades abiertos huérfanos")
+    if exchange_pos and registry_trade_id is not None:
         live_trade_ids = {int(row.get("id")) for row in open_rows if row.get("id") is not None}
         if live_trade_ids and int(registry_trade_id) not in live_trade_ids:
             issues.append("open_trade_id no coincide con el trade abierto")
-    return issues
+    if exchange_error and not local_pos and active_trade_id is None:
+        issues.append("Binance no responde y no hay respaldo local")
+    return issues, active_trade_id, orphan_rows
 
 
 def _run_healthcheck():
@@ -343,24 +394,42 @@ def _run_healthcheck():
     per_symbol = []
     issues = []
     live_count = 0
+    orphan_count = 0
+    exchange_errors = 0
     for symbol in SYMBOLS:
-        live = _position(symbol)
+        snapshot = _position_snapshot(symbol)
+        live = snapshot.get("position")
+        exchange_error = snapshot.get("error")
+        source = snapshot.get("source")
         local = portfolio.get("open_positions", {}).get(symbol)
         registry_trade_id = registry.get(symbol)
         open_rows = [row for row in trade_log.get_all_trades(symbol) if row.get("pnl") is None]
-        if live:
+        if live and source == "binance":
             live_count += 1
-        symbol_issues = _health_issues_for_symbol(live, local, registry_trade_id, open_rows)
+        if exchange_error:
+            exchange_errors += 1
+        symbol_issues, active_trade_id, orphan_rows = _health_issues_for_symbol(
+            live,
+            local,
+            registry_trade_id,
+            open_rows,
+            exchange_error=exchange_error,
+        )
+        orphan_count += len(orphan_rows)
         if symbol_issues:
             for issue in symbol_issues:
                 issues.append(f"{symbol}: {issue}")
         per_symbol.append(
             {
                 "symbol": symbol,
-                "live": bool(live),
+                "live": bool(live and source == "binance"),
                 "local": bool(local),
                 "registry": registry_trade_id is not None,
                 "open_rows": len(open_rows),
+                "active_trade_id": active_trade_id,
+                "orphan_rows": len(orphan_rows),
+                "source": source,
+                "exchange_error": exchange_error,
                 "issues": symbol_issues,
             }
         )
@@ -389,22 +458,24 @@ def _run_healthcheck():
             "registry_entries": registry_count,
             "open_trade_rows_before": len(before_open_rows),
             "open_trade_rows_after": len(open_rows_after),
+            "orphan_trade_rows_after": orphan_count,
+            "exchange_errors": exchange_errors,
         },
         "checks": [
             {
                 "name": "Binance vs estado local",
-                "status": "ok" if live_count == local_count and not any(item["issues"] for item in per_symbol) else "warn",
-                "details": f"{live_count} posiciones vivas, {local_count} posiciones locales",
+                "status": "ok" if exchange_errors == 0 and live_count == local_count and not any(item["issues"] for item in per_symbol) else "warn",
+                "details": f"{live_count} posiciones binance, {local_count} posiciones locales, {exchange_errors} errores de exchange",
             },
             {
                 "name": "Registry de trades",
-                "status": "ok" if registry_count == live_count else "warn",
-                "details": f"{registry_count} entradas activas",
+                "status": "ok" if registry_count == local_count else "warn",
+                "details": f"{registry_count} entradas activas | {local_count} posiciones locales",
             },
             {
                 "name": "Trades abiertos huerfanos",
-                "status": "ok" if len(open_rows_after) == 0 else "warn",
-                "details": f"{len(open_rows_after)} filas abiertas en DB",
+                "status": "ok" if orphan_count == 0 else "warn",
+                "details": f"{orphan_count} filas huérfanas | {len(open_rows_after)} abiertas en DB",
             },
             {
                 "name": "Balance diario",
@@ -450,7 +521,8 @@ def _build_symbol_payload(symbol):
     last = df.iloc[-1].to_dict()
     cols = df.attrs.get("indicator_cols", {})
     price = _as_float(last.get("close"))
-    position = _position(symbol)
+    position_snapshot = _position_snapshot(symbol, price)
+    position = position_snapshot.get("position")
     open_trades = 1 if position else 0
     balance = _get_balance()
     stats = trade_log.get_stats(symbol)
@@ -538,6 +610,8 @@ def _build_symbol_payload(symbol):
         "indicators": indicators,
         "trade_gate": trade_gate,
         "events": events,
+        "position_source": position_snapshot.get("source"),
+        "position_error": position_snapshot.get("error"),
         "updated_at": updated_at.isoformat(),
         "updated_label": updated_at.strftime("%H:%M:%S UTC"),
     }
