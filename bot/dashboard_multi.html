@@ -2381,6 +2381,9 @@
       SYMBOLS.forEach((symbol) => {
         document.getElementById(`panel-${symbol}`).classList.toggle('active', tab === symbol);
       });
+      if (tab === 'agents') {
+        setTimeout(buildAgentsPanel, 30);
+      }
       if (SYMBOLS.includes(tab)) {
         const snapshot = state.symbols[tab]?.snapshot;
         if (snapshot?.candles?.length) {
@@ -2880,7 +2883,6 @@
     }
 
     buildTabs();
-    buildAgentsPanel();
     buildSymbolPanels();
     const healthBtn = document.getElementById('healthCheckBtn');
     if (healthBtn) healthBtn.addEventListener('click', runHealthCheck);
