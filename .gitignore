@@ -19,6 +19,7 @@ __pycache__/
 /bot/.env
 /bot/trades.db
 /bot/daily_balance.json
+/bot/balance_cache.json
 /bot/portfolio_state.json
 /bot/open_trade_id.json
 /bot/__pycache__/

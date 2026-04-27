@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_DOWN
 from functools import lru_cache
+import json
 import os
 import threading
 from typing import Any, Dict, Optional
@@ -23,8 +24,13 @@ API_KEY = os.getenv("BINANCE_API_KEY", "")
 API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 
 _local = threading.local()
+_balance_lock = threading.Lock()
+_balance_cache: dict[str, float | None | int] = {"value": None, "ts": 0}
 _RETRY_COUNT = max(1, int(os.getenv("BINANCE_RETRIES", "3")))
 _RETRY_DELAY = float(os.getenv("BINANCE_RETRY_DELAY", "0.5"))
+_BALANCE_CACHE_TTL = max(5, int(os.getenv("BINANCE_BALANCE_CACHE_TTL", "30")))
+_BALANCE_CACHE_FILE = BASE_DIR / "balance_cache.json"
+_DAILY_BALANCE_FILE = BASE_DIR / "daily_balance.json"
 
 
 def _get_client():
@@ -41,6 +47,47 @@ def _safe_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _read_balance_cache() -> Optional[float]:
+    try:
+        if _BALANCE_CACHE_FILE.exists():
+            payload = json.loads(_BALANCE_CACHE_FILE.read_text(encoding="utf-8"))
+            value = _safe_float(payload.get("balance"))
+            if value is not None:
+                return value
+    except Exception:
+        return None
+    return None
+
+
+def _write_balance_cache(balance: float) -> None:
+    try:
+        _BALANCE_CACHE_FILE.write_text(
+            json.dumps(
+                {
+                    "balance": float(balance),
+                    "ts": int(time.time()),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _read_daily_balance_fallback() -> Optional[float]:
+    try:
+        if _DAILY_BALANCE_FILE.exists():
+            payload = json.loads(_DAILY_BALANCE_FILE.read_text(encoding="utf-8"))
+            value = _safe_float(payload.get("daily_start_balance"))
+            if value is not None:
+                return value
+    except Exception:
+        return None
+    return None
 
 
 def _with_retry(fn, *args, **kwargs):
@@ -206,14 +253,47 @@ def close_position(symbol: str, position: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def get_balance() -> float:
-    balances = _with_retry(_get_client().futures_account_balance)
-    for row in balances:
-        if row.get("asset") == "USDT":
-            for key in ("availableBalance", "balance", "crossWalletBalance"):
-                value = _safe_float(row.get(key))
-                if value is not None:
-                    return value
+def get_balance(force_refresh: bool = False) -> float:
+    now = time.time()
+    with _balance_lock:
+        cached_value = _balance_cache.get("value")
+        cached_ts = float(_balance_cache.get("ts") or 0)
+        if cached_value is not None and not force_refresh and now - cached_ts < _BALANCE_CACHE_TTL:
+            return float(cached_value)
+
+    try:
+        balances = _with_retry(_get_client().futures_account_balance)
+        for row in balances:
+            if row.get("asset") == "USDT":
+                for key in ("availableBalance", "balance", "crossWalletBalance"):
+                    value = _safe_float(row.get(key))
+                    if value is not None:
+                        with _balance_lock:
+                            _balance_cache["value"] = value
+                            _balance_cache["ts"] = now
+                        _write_balance_cache(value)
+                        return value
+    except Exception:
+        pass
+
+    cached = _read_balance_cache()
+    if cached is not None:
+        with _balance_lock:
+            _balance_cache["value"] = cached
+            _balance_cache["ts"] = now
+        return cached
+
+    daily_cached = _read_daily_balance_fallback()
+    if daily_cached is not None:
+        with _balance_lock:
+            _balance_cache["value"] = daily_cached
+            _balance_cache["ts"] = now
+        return daily_cached
+
+    with _balance_lock:
+        cached_value = _balance_cache.get("value")
+        if cached_value is not None:
+            return float(cached_value)
     return 0.0
 
 
