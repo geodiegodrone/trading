@@ -2227,145 +2227,273 @@
       `;
     }
 
-    // ── AGENTS CANVAS ─────────────────────────────────────────────────────────
+    // ── AGENTS CANVAS — Pixel Art Office ──────────────────────────────────────
     const AGENT_DEFS = [
-      { id: 'market-scout',     name: 'Market Scout',     color: '#7dd3fc', col: 0, row: 0 },
-      { id: 'risk-warden',      name: 'Risk Warden',      color: '#fbbf24', col: 1, row: 0 },
-      { id: 'execution-runner', name: 'Execution Runner', color: '#c084fc', col: 2, row: 0 },
-      { id: 'health-sentinel',  name: 'Health Sentinel',  color: '#36d399', col: 0, row: 1 },
-      { id: 'report-scribe',    name: 'Report Scribe',    color: '#60a5fa', col: 1, row: 1 },
+      { id: 'market-scout',     name: 'Market Scout',     shirt: '#e53e3e', hair: '#2d1500', skin: '#f5c6a0' },
+      { id: 'risk-warden',      name: 'Risk Warden',      shirt: '#805ad5', hair: '#1a1a1a', skin: '#d4956a' },
+      { id: 'execution-runner', name: 'Execution Runner', shirt: '#3182ce', hair: '#6b3f00', skin: '#c68642' },
+      { id: 'health-sentinel',  name: 'Health Sentinel',  shirt: '#2f855a', hair: '#1a1a1a', skin: '#f5deb3' },
+      { id: 'report-scribe',    name: 'Report Scribe',    shirt: '#b7791f', hair: '#1a0a00', skin: '#f5c6a0' },
     ];
     const _agentLive = AGENT_DEFS.map(d => ({
       ...d, activity: 'waiting', x: 0, y: 0, tx: 0, ty: 0,
       bob: Math.random() * Math.PI * 2, deskX: 0, deskY: 0,
     }));
     let _agentsRaf = null;
+    const _PX = 3; // pixel scale
 
-    function _drawDesk(ctx, x, y, color) {
-      ctx.fillStyle = '#6b3f1a'; ctx.beginPath(); ctx.roundRect(x, y, 100, 40, 5); ctx.fill();
-      ctx.fillStyle = '#1e2533'; ctx.fillRect(x + 30, y - 28, 40, 24);
-      ctx.fillStyle = '#0d1117'; ctx.fillRect(x + 33, y - 25, 34, 18);
-      ctx.fillStyle = color + '40'; ctx.fillRect(x + 33, y - 25, 34, 18);
-      ctx.fillStyle = '#3a2810'; ctx.fillRect(x + 8, y + 40, 7, 14); ctx.fillRect(x + 85, y + 40, 7, 14);
-      ctx.fillStyle = '#2a2d3a'; ctx.fillRect(x + 14, y + 8, 52, 7);
+    function _pxRect(ctx, x, y, w, h, color) {
+      ctx.fillStyle = color;
+      ctx.fillRect(x * _PX, y * _PX, w * _PX, h * _PX);
     }
 
-    function _drawChar(ctx, x, y, color, activity, bob, t) {
-      const by = y + Math.sin(t * 0.003 + bob) * (activity === 'walking' ? 3 : 1);
-      ctx.globalAlpha = 0.18; ctx.fillStyle = '#000';
-      ctx.beginPath(); ctx.ellipse(x, by + 17, 9, 4, 0, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1;
-      ctx.fillStyle = color; ctx.fillRect(x - 7, by - 4, 14, 13);
-      ctx.fillStyle = '#f5c6a0'; ctx.fillRect(x - 5, by - 18, 10, 11);
-      ctx.fillStyle = '#3a2000'; ctx.fillRect(x - 5, by - 18, 10, 4);
-      ctx.fillStyle = '#1a1a2e'; ctx.fillRect(x - 2, by - 13, 2, 2); ctx.fillRect(x + 1, by - 13, 2, 2);
-      const ls = activity === 'walking' ? Math.sin(t * 0.018 + bob) * 5 : 0;
-      ctx.fillStyle = '#1e2533'; ctx.fillRect(x - 5 + ls, by + 9, 5, 9); ctx.fillRect(x + 1 - ls, by + 9, 5, 9);
-      const as = activity === 'typing' ? Math.sin(t * 0.025 + bob) * 5 : 0;
-      ctx.fillStyle = color; ctx.fillRect(x - 11, by - 3 + as, 4, 9); ctx.fillRect(x + 7, by - 3 - as, 4, 9);
+    function _drawPixelChar(ctx, cx, cy, hair, shirt, skin, activity, t, bob) {
+      const S = _PX;
+      const by = Math.round(cy + Math.sin(t * 0.004 + bob) * (activity === 'walking' ? 2.5 : 0.8));
+      // shadow
+      ctx.save(); ctx.globalAlpha = 0.22; ctx.fillStyle = '#000';
+      ctx.beginPath(); ctx.ellipse(cx, by + 14*S, 7*S, 3*S, 0, 0, Math.PI*2); ctx.fill(); ctx.restore();
+      // pixel layout (8 wide, 12 tall), cx/cy is feet position
+      const ox = cx - 4*S, oy = by - 12*S;
+      const arm = activity === 'typing' ? Math.round(Math.sin(t * 0.03 + bob) * 2) : 0;
+      const legL = activity === 'walking' ? Math.round(Math.sin(t * 0.02 + bob) * 3) : 0;
+      const legR = -legL;
+      // hair
+      [[1,0,6,1],[0,0,8,1],[0,0,8,1]].forEach(([x,y,w,h],i) => { _pxRect(ctx,(ox/S)+x,oy/S+i,w,h,hair); });
+      // skin face
+      [[0,3,8,3]].forEach(([x,y,w,h]) => { _pxRect(ctx,(ox/S)+x,oy/S+y,w,h,skin); });
+      // eyes
+      _pxRect(ctx,(ox/S)+1,(oy/S)+4,2,1,'#222'); _pxRect(ctx,(ox/S)+5,(oy/S)+4,2,1,'#222');
+      // shirt body
+      [[0,6,8,3]].forEach(([x,y,w,h]) => { _pxRect(ctx,(ox/S)+x,oy/S+y,w,h,shirt); });
+      // arms with animation
+      ctx.fillStyle = shirt;
+      ctx.fillRect(ox - 2*S, oy + (6+arm)*S, 2*S, 2*S); // left arm
+      ctx.fillRect(ox + 8*S, oy + (6-arm)*S, 2*S, 2*S); // right arm
+      // pants
+      ctx.fillStyle = '#2c3e50';
+      ctx.fillRect(ox, oy + 9*S, 3*S, 3*S); ctx.fillRect(ox + 5*S, oy + 9*S, 3*S, 3*S);
+      // shoes
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(ox - S + legL, oy + 12*S, 4*S, S); ctx.fillRect(ox + 5*S + legR, oy + 12*S, 4*S, S);
+      // activity bubble
       if (activity === 'typing') {
-        ctx.fillStyle = 'rgba(255,255,255,.15)'; ctx.fillRect(x + 7, by - 26, 18, 9);
-        ctx.fillStyle = '#fff'; ctx.font = '7px monospace'; ctx.textAlign = 'left'; ctx.fillText('...', x + 9, by - 19);
+        ctx.fillStyle = 'rgba(255,255,255,.18)';
+        ctx.fillRect(cx + 8*S, by - 14*S, 14*S, 8*S);
+        ctx.fillStyle = '#eee'; ctx.font = `${6*S}px monospace`; ctx.textAlign = 'left';
+        ctx.fillText('...', cx + 9*S, by - 8*S);
       } else if (activity === 'alert') {
-        ctx.fillStyle = '#f87171'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('!', x, by - 22);
-      } else if (activity === 'monitoring') {
-        ctx.fillStyle = '#fbbf24'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('●', x, by - 20);
+        ctx.fillStyle = '#f87171'; ctx.font = `bold ${8*S}px monospace`; ctx.textAlign = 'center';
+        ctx.fillText('!', cx, by - 14*S);
       }
-      ctx.fillStyle = color; ctx.font = 'bold 9px Inter,sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(activity, x, by - 27); ctx.textAlign = 'left';
+      ctx.textAlign = 'left';
     }
 
-    function _drawBg(ctx, W, H) {
-      const fy = H * 0.72;
-      ctx.fillStyle = '#0d1117'; ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = '#11151f'; ctx.fillRect(0, 0, W, fy);
-      ctx.strokeStyle = 'rgba(255,255,255,.03)'; ctx.lineWidth = 1;
-      for (let tx = 0; tx < W; tx += 44) { ctx.beginPath(); ctx.moveTo(tx, fy); ctx.lineTo(tx, H); ctx.stroke(); }
-      for (let ty = fy; ty < H; ty += 32) { ctx.beginPath(); ctx.moveTo(0, ty); ctx.lineTo(W, ty); ctx.stroke(); }
-      ctx.fillStyle = 'rgba(255,255,255,.04)'; ctx.fillRect(0, fy, W, 2);
-      // clock
-      const cx2 = W / 2, cy2 = 26;
-      ctx.fillStyle = '#1e2533'; ctx.beginPath(); ctx.arc(cx2, cy2, 16, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = '#4a5060'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx2, cy2, 16, 0, Math.PI * 2); ctx.stroke();
-      const now2 = new Date();
-      const ha = ((now2.getHours() % 12) / 12 + now2.getMinutes() / 720) * Math.PI * 2 - Math.PI / 2;
-      const ma = (now2.getMinutes() / 60) * Math.PI * 2 - Math.PI / 2;
-      ctx.strokeStyle = '#cdd5e0'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx2, cy2); ctx.lineTo(cx2 + Math.cos(ha) * 8, cy2 + Math.sin(ha) * 8); ctx.stroke();
-      ctx.strokeStyle = '#36d399'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(cx2, cy2); ctx.lineTo(cx2 + Math.cos(ma) * 12, cy2 + Math.sin(ma) * 12); ctx.stroke();
-      // plants
-      ctx.fillStyle = '#15803d'; ctx.beginPath(); ctx.arc(18, fy - 30, 14, 0, Math.PI * 2); ctx.fill();
-      ctx.beginPath(); ctx.arc(12, fy - 42, 10, 0, Math.PI * 2); ctx.fill();
-      ctx.beginPath(); ctx.arc(26, fy - 44, 9, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#14532d'; ctx.fillRect(8, fy - 18, 20, 18);
-      ctx.fillStyle = '#15803d'; ctx.beginPath(); ctx.arc(W - 20, fy - 28, 12, 0, Math.PI * 2); ctx.fill();
-      ctx.beginPath(); ctx.arc(W - 28, fy - 40, 9, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#14532d'; ctx.fillRect(W - 30, fy - 16, 20, 16);
+    function _drawPixelDesk(ctx, x, y) {
+      const S = _PX;
+      // desk top
+      ctx.fillStyle = '#8B5A2B'; ctx.fillRect(x, y, 22*S, 14*S);
+      // desk edge/shadow
+      ctx.fillStyle = '#5C3A10'; ctx.fillRect(x, y+14*S, 22*S, 2*S); ctx.fillRect(x+22*S, y, 2*S, 14*S);
+      // monitor back
+      ctx.fillStyle = '#2d3748'; ctx.fillRect(x+7*S, y-9*S, 12*S, 9*S);
+      // screen
+      ctx.fillStyle = '#0d1117'; ctx.fillRect(x+8*S, y-8*S, 10*S, 7*S);
+      ctx.fillStyle = 'rgba(56,189,248,0.15)'; ctx.fillRect(x+8*S, y-8*S, 10*S, 7*S);
+      // monitor stand
+      ctx.fillStyle = '#444'; ctx.fillRect(x+12*S, y-S, 2*S, S);
+      // keyboard
+      ctx.fillStyle = '#374151'; ctx.fillRect(x+4*S, y+4*S, 10*S, 3*S);
+      // legs
+      ctx.fillStyle = '#5C3A10'; ctx.fillRect(x+2*S, y+16*S, 3*S, 4*S); ctx.fillRect(x+17*S, y+16*S, 3*S, 4*S);
+    }
+
+    function _drawBookshelf(ctx, x, y, w, h) {
+      const BC = ['#e53e3e','#38a169','#d69e2e','#3182ce','#805ad5','#dd6b20','#2b6cb0','#c53030'];
+      ctx.fillStyle = '#6b4c2a'; ctx.fillRect(x, y, w, h);
+      ctx.fillStyle = '#4a3319'; ctx.fillRect(x, y+h/2-1, w, 2);
+      [0, Math.floor(h/2)].forEach((sy, si) => {
+        let bx = x+2, bi = si*4;
+        while (bx < x+w-4) {
+          const bw = 4+((bx+bi)%3); ctx.fillStyle = BC[(bi++)%BC.length];
+          ctx.fillRect(bx, y+sy+2, bw, Math.floor(h/2)-4); bx += bw+1;
+        }
+      });
+    }
+
+    function _drawPlant(ctx, x, y, sz) {
+      sz = sz || 14;
+      ctx.fillStyle = '#744210'; ctx.fillRect(x-sz/4, y, sz/2, sz/2);
+      ctx.fillStyle = '#276749';
+      ctx.beginPath(); ctx.arc(x, y-sz*0.6, sz*0.8, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#2f855a';
+      ctx.beginPath(); ctx.arc(x-sz*0.55, y-sz*1.0, sz*0.6, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x+sz*0.55, y-sz*1.1, sz*0.55, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#38a169';
+      ctx.beginPath(); ctx.arc(x, y-sz*1.2, sz*0.45, 0, Math.PI*2); ctx.fill();
+    }
+
+    function _drawClock(ctx, cx, cy) {
+      ctx.fillStyle = '#f7fafc'; ctx.beginPath(); ctx.arc(cx, cy, 14, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = '#cbd5e0'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.arc(cx, cy, 14, 0, Math.PI*2); ctx.stroke();
+      ctx.fillStyle='#2d3748'; ctx.beginPath(); ctx.arc(cx,cy,2,0,Math.PI*2); ctx.fill();
+      const now=new Date();
+      const ha=((now.getHours()%12)/12+now.getMinutes()/720)*Math.PI*2-Math.PI/2;
+      const ma=(now.getMinutes()/60)*Math.PI*2-Math.PI/2;
+      ctx.strokeStyle='#2d3748';ctx.lineWidth=2;
+      ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+Math.cos(ha)*8,cy+Math.sin(ha)*8);ctx.stroke();
+      ctx.strokeStyle='#e53e3e';ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+Math.cos(ma)*11,cy+Math.sin(ma)*11);ctx.stroke();
+    }
+
+    function _drawVendingMachine(ctx, x, y) {
+      ctx.fillStyle='#2b6cb0';ctx.fillRect(x,y,26,46);
+      ctx.fillStyle='#1a4a7a';ctx.fillRect(x,y+46,26,5);
+      ctx.fillStyle='#ebf8ff';ctx.fillRect(x+3,y+4,20,26);
+      ['#e53e3e','#38a169','#d69e2e'].forEach((c,i)=>{
+        ctx.fillStyle=c;ctx.fillRect(x+5,y+6+i*8,7,5);ctx.fillRect(x+14,y+6+i*8,7,5);
+      });
+      ctx.fillStyle='#2c5282';ctx.fillRect(x+3,y+32,20,8);
+      ctx.fillStyle='#90cdf4';ctx.fillRect(x+6,y+34,5,4);
+    }
+
+    function _drawFridge(ctx, x, y) {
+      ctx.fillStyle='#e2e8f0';ctx.fillRect(x,y,36,50);
+      ctx.fillStyle='#cbd5e0';ctx.fillRect(x+1,y+1,17,47);ctx.fillRect(x+19,y+1,16,47);
+      ctx.fillStyle='#a0aec0';ctx.fillRect(x+17,y+1,2,47);
+      ctx.fillStyle='#718096';ctx.fillRect(x+13,y+22,3,4);ctx.fillRect(x+20,y+22,3,4);
+    }
+
+    function _drawOffice(ctx, W, H) {
+      const midX=Math.floor(W*0.63), midY=Math.floor(H*0.5);
+
+      // ── LEFT ROOM: main office (brown wooden floor) ──
+      for(let r=0;r<H;r+=14){
+        ctx.fillStyle=(Math.floor(r/14)%2===0)?'#8B5A2B':'#7a4f22';
+        ctx.fillRect(0,r,midX,14);
+      }
+      ctx.strokeStyle='rgba(0,0,0,.13)';ctx.lineWidth=1;
+      for(let r=0;r<H;r+=14){ctx.beginPath();ctx.moveTo(0,r);ctx.lineTo(midX,r);ctx.stroke();}
+      for(let c=0;c<midX;c+=40){ctx.strokeStyle='rgba(0,0,0,.07)';ctx.beginPath();ctx.moveTo(c,0);ctx.lineTo(c,H);ctx.stroke();}
+      // top wall
+      ctx.fillStyle='#b0a090';ctx.fillRect(0,0,midX,30);
+      _drawBookshelf(ctx,8,2,110,26);_drawBookshelf(ctx,128,2,110,26);_drawBookshelf(ctx,250,2,110,26);
+      // small wall items
+      ctx.fillStyle='#718096';ctx.fillRect(midX-30,2,24,22); // whiteboard
+      ctx.fillStyle='#e2e8f0';ctx.fillRect(midX-28,4,20,18);
+      ctx.strokeStyle='#38a169';ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(midX-26,16);ctx.lineTo(midX-22,8);ctx.lineTo(midX-18,14);ctx.lineTo(midX-12,6);ctx.stroke();
+
+      // ── TOP-RIGHT ROOM: kitchen (light tile floor) ──
+      ctx.fillStyle='#f0ebe3';ctx.fillRect(midX,0,W-midX,midY);
+      ctx.strokeStyle='rgba(180,170,155,.55)';ctx.lineWidth=1;
+      for(let r=0;r<midY;r+=18){ctx.beginPath();ctx.moveTo(midX,r);ctx.lineTo(W,r);ctx.stroke();}
+      for(let c=midX;c<W;c+=18){ctx.beginPath();ctx.moveTo(c,0);ctx.lineTo(c,midY);ctx.stroke();}
+      ctx.fillStyle='#d4c8b8';ctx.fillRect(midX,0,W-midX,28);
+      _drawClock(ctx,midX+Math.floor((W-midX)/2),20);
+      _drawVendingMachine(ctx,midX+16,28);
+      _drawFridge(ctx,W-46,28);
+      // counter
+      ctx.fillStyle='#e2d9c8';ctx.fillRect(midX+16,midY-20,W-midX-20,20);
+      ctx.fillStyle='#ccc';ctx.fillRect(midX+18,midY-18,W-midX-24,16);
+
+      // ── BOTTOM-RIGHT ROOM: meeting/lounge (blue carpet) ──
+      ctx.fillStyle='#4a90b8';ctx.fillRect(midX,midY,W-midX,H-midY);
+      ctx.fillStyle='rgba(74,120,168,0.4)';ctx.fillRect(midX+12,midY+12,W-midX-24,H-midY-24);
+      ctx.strokeStyle='rgba(100,160,200,.3)';ctx.lineWidth=1;
+      for(let r=midY;r<H;r+=16){ctx.beginPath();ctx.moveTo(midX,r);ctx.lineTo(W,r);ctx.stroke();}
+      for(let c=midX;c<W;c+=16){ctx.beginPath();ctx.moveTo(c,midY);ctx.lineTo(c,H);ctx.stroke();}
+      // meeting room top wall
+      ctx.fillStyle='#9ab8cc';ctx.fillRect(midX,midY,W-midX,28);
+      _drawBookshelf(ctx,midX+6,midY+2,90,24);_drawBookshelf(ctx,midX+104,midY+2,80,24);
+      // framed picture
+      ctx.fillStyle='#4a7a92';ctx.fillRect(W-80,midY+4,65,20);
+      ctx.fillStyle='#5a9a7a';ctx.fillRect(W-78,midY+6,61,12);
+      ctx.strokeStyle='#355e73';ctx.lineWidth=1.5;ctx.strokeRect(W-80,midY+4,65,20);
+      // right wall bookshelves
+      _drawBookshelf(ctx,W-22,midY+34,18,H-midY-44);
+
+      // ── DIVIDERS ──
+      ctx.fillStyle='#4a5568';ctx.fillRect(midX,0,3,H);ctx.fillRect(midX,midY,W-midX,3);
+
+      // ── PLANTS ──
+      _drawPlant(ctx,10,H-14,12);_drawPlant(ctx,midX-20,H-14,11);
+      _drawPlant(ctx,midX-20,midY-8,10);_drawPlant(ctx,W-14,midY+22,10);_drawPlant(ctx,W-14,H-14,11);
     }
 
     function buildAgentsPanel() {
       const canvas = document.getElementById('agentsCanvas');
       if (!canvas) return;
-      const W = canvas.parentElement.clientWidth - 2;
-      const H = Math.max(400, Math.round(W * 0.4));
+      const W = Math.max(640, canvas.parentElement.clientWidth - 2);
+      const H = Math.round(W * 0.44);
       canvas.width = W; canvas.height = H; canvas.style.height = H + 'px';
-      const cols = 3, gapX = W / (cols + 1), gapY = H * 0.33;
-      _agentLive.forEach(a => {
-        a.deskX = gapX * (a.col + 0.7) - 50;
-        a.deskY = H * 0.38 + a.row * gapY;
-        a.tx = a.deskX + 50; a.ty = a.deskY + 58;
-        a.x = a.tx; a.y = a.ty;
+      const midX=Math.floor(W*0.63), midY=Math.floor(H*0.5);
+      // desk positions: 4 in left room (2x2), 1 in meeting room
+      const deskW=22*_PX, deskH=14*_PX;
+      const desks=[
+        {x:Math.floor(midX*0.08), y:Math.floor(H*0.34)},
+        {x:Math.floor(midX*0.08), y:Math.floor(H*0.60)},
+        {x:Math.floor(midX*0.42), y:Math.floor(H*0.34)},
+        {x:Math.floor(midX*0.42), y:Math.floor(H*0.60)},
+        {x:midX+Math.floor((W-midX)*0.28), y:midY+Math.floor((H-midY)*0.32)},
+      ];
+      _agentLive.forEach((a,i)=>{
+        const d=desks[i]||desks[0];
+        a.deskX=d.x; a.deskY=d.y;
+        a.tx=d.x+deskW/2; a.ty=d.y+deskH+8*_PX;
+        a.x=a.tx; a.y=a.ty;
       });
       if (_agentsRaf) cancelAnimationFrame(_agentsRaf);
-      let t = 0;
-      function loop() {
+      let t=0;
+      function loop(){
         t++;
-        const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, W, H);
-        _drawBg(ctx, W, H);
-        _agentLive.forEach(a => { _drawDesk(ctx, a.deskX, a.deskY, a.color); });
-        _agentLive.forEach(a => {
-          const dx = a.tx - a.x, dy = a.ty - a.y;
-          if (Math.abs(dx) > 1 || Math.abs(dy) > 1) { a.x += dx * 0.05; a.y += dy * 0.05; }
+        const ctx=canvas.getContext('2d');
+        ctx.clearRect(0,0,W,H);
+        _drawOffice(ctx,W,H);
+        _agentLive.forEach(a=>_drawPixelDesk(ctx,a.deskX,a.deskY));
+        _agentLive.forEach(a=>{
+          const dx=a.tx-a.x, dy=a.ty-a.y;
+          if(Math.abs(dx)>0.4||Math.abs(dy)>0.4){a.x+=dx*0.055;a.y+=dy*0.055;}
         });
-        [..._agentLive].sort((a, b) => a.y - b.y).forEach(a => {
-          _drawChar(ctx, Math.round(a.x), Math.round(a.y), a.color, a.activity, a.bob, t);
+        [..._agentLive].sort((a,b)=>a.y-b.y).forEach(a=>{
+          _drawPixelChar(ctx,Math.round(a.x),Math.round(a.y),a.hair,a.shirt,a.skin,a.activity,t,a.bob);
         });
-        const sh = 38; ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(0, H - sh, W, sh);
-        const cw = W / _agentLive.length;
-        _agentLive.forEach((a, i) => {
-          const lcx = cw * i + cw / 2;
-          ctx.fillStyle = a.color; ctx.font = 'bold 10px Inter,sans-serif'; ctx.textAlign = 'center';
-          ctx.fillText(a.name, lcx, H - sh + 14);
-          ctx.fillStyle = '#8d93a6'; ctx.font = '9px Inter,sans-serif';
-          ctx.fillText(a.activity, lcx, H - sh + 26);
+        const sh=30;ctx.fillStyle='rgba(0,0,0,.72)';ctx.fillRect(0,H-sh,W,sh);
+        const cw=W/_agentLive.length;
+        _agentLive.forEach((a,i)=>{
+          const lcx=cw*i+cw/2;
+          ctx.fillStyle=a.shirt;ctx.font='bold 10px monospace';ctx.textAlign='center';
+          ctx.fillText(a.name,lcx,H-sh+12);
+          ctx.fillStyle='#a0aec0';ctx.font='9px monospace';
+          ctx.fillText(a.activity,lcx,H-sh+24);
         });
-        ctx.textAlign = 'left';
-        _agentsRaf = requestAnimationFrame(loop);
+        ctx.textAlign='left';
+        _agentsRaf=requestAnimationFrame(loop);
       }
       loop();
     }
 
     function renderAgents(payload) {
-      const title = document.getElementById('agentsTitle');
-      const sub = document.getElementById('agentsSub');
-      if (title) title.textContent = payload?.title || 'Agentes auxiliares';
-      if (sub) {
-        const ready = payload?.summary?.ready_symbols?.length ?? 0;
-        const active = payload?.summary?.active_symbols?.length ?? 0;
-        const warn = payload?.summary?.warnings?.length ?? 0;
-        sub.textContent = `Listos: ${ready} | Activos: ${active} | Alertas: ${warn}`;
+      const title=document.getElementById('agentsTitle');
+      const sub=document.getElementById('agentsSub');
+      if(title)title.textContent=payload?.title||'Agentes auxiliares';
+      if(sub){
+        const r=payload?.summary?.ready_symbols?.length??0;
+        const a=payload?.summary?.active_symbols?.length??0;
+        const w=payload?.summary?.warnings?.length??0;
+        sub.textContent=`Listos: ${r} | Activos: ${a} | Alertas: ${w}`;
       }
-      (payload?.agents || []).forEach(inc => {
-        const a = _agentLive.find(x => x.id === inc.id);
-        if (!a) return;
-        a.activity = inc.activity || 'waiting';
-        const canvas = document.getElementById('agentsCanvas');
-        const W = canvas?.width || 800, H = canvas?.height || 400;
-        if (a.activity === 'typing' || a.activity === 'alert') {
-          a.tx = a.deskX + 50 + (Math.random() - .5) * 30; a.ty = a.deskY + 70;
-        } else if (a.activity === 'walking') {
-          a.tx = 80 + Math.random() * (W - 160); a.ty = H * 0.52 + Math.random() * H * 0.1;
+      (payload?.agents||[]).forEach(inc=>{
+        const a=_agentLive.find(x=>x.id===inc.id);
+        if(!a)return;
+        a.activity=inc.activity||'waiting';
+        const canvas=document.getElementById('agentsCanvas');
+        const W=canvas?.width||800,H=canvas?.height||400;
+        const midX=Math.floor(W*0.63);
+        if(a.activity==='walking'){
+          a.tx=40+Math.random()*(midX-80); a.ty=50+Math.random()*(H-100);
         } else {
-          a.tx = a.deskX + 50; a.ty = a.deskY + 58;
+          a.tx=a.deskX+11*_PX; a.ty=a.deskY+22*_PX;
         }
       });
     }
