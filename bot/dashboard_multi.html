@@ -628,7 +628,8 @@
     }
 
     .agents-grid {
-      display: block;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
       gap: 14px;
     }
 
@@ -641,6 +642,59 @@
       border: 1px solid rgba(255,255,255,0.05);
       background: rgba(17, 17, 23, 0.95);
       overflow: hidden;
+    }
+
+    .agent-card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .agent-card-title {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .agent-card-status {
+      flex: 0 0 auto;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.03);
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      font-weight: 800;
+    }
+
+    .agent-card-task {
+      color: #d7dde7;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .agent-card-metrics {
+      display: grid;
+      gap: 8px;
+    }
+
+    .agent-card-metric-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .agent-card-metric-row strong {
+      color: var(--text);
+      font-size: 12px;
+      text-transform: none;
+      letter-spacing: 0;
     }
 
     .agent-card::before {
@@ -1827,7 +1881,7 @@
           </div>
           <div style="color:#36d399;font-size:12px;font-weight:700;letter-spacing:.08em;">BINANCE DEMO · LIVE</div>
         </div>
-        <canvas id="agentsCanvas" style="width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.07);display:block;background:#0d1117;"></canvas>
+        <div class="agents-grid" id="agentsGrid"></div>
       </div>
     </section>
 
@@ -2422,81 +2476,85 @@
       _drawPlant(ctx,midX-20,midY-8,10);_drawPlant(ctx,W-14,midY+22,10);_drawPlant(ctx,W-14,H-14,11);
     }
 
+    function agentCardState(agent) {
+      const status = String(agent?.status || 'idle').toLowerCase();
+      const activity = String(agent?.activity || 'idle').toLowerCase();
+      const classes = ['agent-card'];
+      if (status === 'warn') classes.push('warn');
+      else if (status === 'active') classes.push('ok');
+      else classes.push('busy');
+      if (status === 'warn') classes.push('state-warn');
+      else if (status === 'active') classes.push('state-active');
+      else classes.push('state-idle');
+      if (activity) classes.push(`activity-${activity}`);
+      return classes.join(' ');
+    }
+
+    function agentMetricRows(agent) {
+      return (Array.isArray(agent?.metrics) ? agent.metrics : []).map((metric) => `
+        <div class="agent-card-metric-row">
+          <span>${escapeHtml(metric?.label || '--')}</span>
+          <strong>${escapeHtml(metric?.value ?? '--')}</strong>
+        </div>
+      `).join('');
+    }
+
+    function agentCardTemplate(agent, index) {
+      const status = String(agent?.status || 'idle').toUpperCase();
+      const activity = String(agent?.activity || 'idle');
+      const energy = Math.max(0, Math.min(100, Number(agent?.energy ?? 0)));
+      const energyLabel = energy >= 70 ? 'Alto' : energy >= 40 ? 'Medio' : 'Bajo';
+      return `
+        <article class="${agentCardState(agent)}" style="--agent-accent:${agent?.accent || '#7dd3fc'}">
+          <div class="agent-card-head">
+            <div class="agent-card-title">
+              <div class="agent-name">${escapeHtml(agent?.name || `Agent ${index + 1}`)}</div>
+              <div class="agent-role">${escapeHtml(agent?.role || 'Agente auxiliar')}</div>
+            </div>
+            <span class="agent-card-status">${escapeHtml(status)}</span>
+          </div>
+          <div class="agent-card-task">${escapeHtml(agent?.task || 'Sin tarea asignada')}</div>
+          <div class="agent-card-metrics">
+            ${agentMetricRows(agent)}
+          </div>
+          <div class="agent-bar"><div style="width:${energy}%"></div></div>
+          <div class="agent-foot">
+            <span>Actividad: ${escapeHtml(agentActivityLabel(activity))}</span>
+            <span>Energía: ${energy}% (${energyLabel})</span>
+          </div>
+        </article>
+      `;
+    }
+
     function buildAgentsPanel() {
-      const canvas = document.getElementById('agentsCanvas');
-      if (!canvas) return;
-      const W = Math.max(640, canvas.parentElement.clientWidth - 2);
-      const H = Math.round(W * 0.44);
-      canvas.width = W; canvas.height = H; canvas.style.height = H + 'px';
-      const midX=Math.floor(W*0.63), midY=Math.floor(H*0.5);
-      // desk positions: 4 in left room (2x2), 1 in meeting room
-      const deskW=22*_PX, deskH=14*_PX;
-      const desks=[
-        {x:Math.floor(midX*0.08), y:Math.floor(H*0.34)},
-        {x:Math.floor(midX*0.08), y:Math.floor(H*0.60)},
-        {x:Math.floor(midX*0.42), y:Math.floor(H*0.34)},
-        {x:Math.floor(midX*0.42), y:Math.floor(H*0.60)},
-        {x:midX+Math.floor((W-midX)*0.28), y:midY+Math.floor((H-midY)*0.32)},
-      ];
-      _agentLive.forEach((a,i)=>{
-        const d=desks[i]||desks[0];
-        a.deskX=d.x; a.deskY=d.y;
-        a.tx=d.x+deskW/2; a.ty=d.y+deskH+8*_PX;
-        a.x=a.tx; a.y=a.ty;
-      });
-      if (_agentsRaf) cancelAnimationFrame(_agentsRaf);
-      let t=0;
-      function loop(){
-        t++;
-        const ctx=canvas.getContext('2d');
-        ctx.clearRect(0,0,W,H);
-        _drawOffice(ctx,W,H);
-        _agentLive.forEach(a=>_drawPixelDesk(ctx,a.deskX,a.deskY));
-        _agentLive.forEach(a=>{
-          const dx=a.tx-a.x, dy=a.ty-a.y;
-          if(Math.abs(dx)>0.4||Math.abs(dy)>0.4){a.x+=dx*0.055;a.y+=dy*0.055;}
-        });
-        [..._agentLive].sort((a,b)=>a.y-b.y).forEach(a=>{
-          _drawPixelChar(ctx,Math.round(a.x),Math.round(a.y),a.hair,a.shirt,a.skin,a.activity,t,a.bob);
-        });
-        const sh=30;ctx.fillStyle='rgba(0,0,0,.72)';ctx.fillRect(0,H-sh,W,sh);
-        const cw=W/_agentLive.length;
-        _agentLive.forEach((a,i)=>{
-          const lcx=cw*i+cw/2;
-          ctx.fillStyle=a.shirt;ctx.font='bold 10px monospace';ctx.textAlign='center';
-          ctx.fillText(a.name,lcx,H-sh+12);
-          ctx.fillStyle='#a0aec0';ctx.font='9px monospace';
-          ctx.fillText(a.activity,lcx,H-sh+24);
-        });
-        ctx.textAlign='left';
-        _agentsRaf=requestAnimationFrame(loop);
+      const grid = document.getElementById('agentsGrid');
+      if (!grid) return;
+      const payload = state.agents || {};
+      const agents = Array.isArray(payload?.agents) ? payload.agents : [];
+      if (!agents.length) {
+        grid.innerHTML = `
+          <div class="agent-card">
+            <div class="agent-name">Esperando agentes</div>
+            <div class="agent-role">El backend todavia no envió estado para los asistentes.</div>
+          </div>
+        `;
+        return;
       }
-      loop();
+      grid.innerHTML = agents.map((agent, index) => agentCardTemplate(agent, index)).join('');
     }
 
     function renderAgents(payload) {
-      const title=document.getElementById('agentsTitle');
-      const sub=document.getElementById('agentsSub');
-      if(title)title.textContent=payload?.title||'Agentes auxiliares';
-      if(sub){
-        const r=payload?.summary?.ready_symbols?.length??0;
-        const a=payload?.summary?.active_symbols?.length??0;
-        const w=payload?.summary?.warnings?.length??0;
-        sub.textContent=`Listos: ${r} | Activos: ${a} | Alertas: ${w}`;
+      state.agents = payload || {};
+      const title = document.getElementById('agentsTitle');
+      const sub = document.getElementById('agentsSub');
+      if (title) title.textContent = payload?.title || 'Agentes auxiliares';
+      if (sub) {
+        const r = payload?.summary?.ready_symbols?.length ?? 0;
+        const a = payload?.summary?.active_symbols?.length ?? 0;
+        const w = payload?.summary?.warnings?.length ?? 0;
+        sub.textContent = `Listos: ${r} | Activos: ${a} | Alertas: ${w}`;
       }
-      (payload?.agents||[]).forEach(inc=>{
-        const a=_agentLive.find(x=>x.id===inc.id);
-        if(!a)return;
-        a.activity=inc.activity||'waiting';
-        const canvas=document.getElementById('agentsCanvas');
-        const W=canvas?.width||800,H=canvas?.height||400;
-        const midX=Math.floor(W*0.63);
-        if(a.activity==='walking'){
-          a.tx=40+Math.random()*(midX-80); a.ty=50+Math.random()*(H-100);
-        } else {
-          a.tx=a.deskX+11*_PX; a.ty=a.deskY+22*_PX;
-        }
-      });
+      buildAgentsPanel();
     }
 
     function buildSymbolPanels() {
