@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover
 BASE_DIR = Path(__file__).resolve().parent
 LEGACY_MODEL_PATH = BASE_DIR / "model.pkl"
 MIN_TRAIN_TRADES = int(os.getenv("ML_MIN_TRAIN_TRADES", "20"))
+MIN_VALIDATION_ACCURACY = float(os.getenv("ML_MIN_VALIDATION_ACCURACY", "0.55"))
 _TRAIN_LOCK = threading.Lock()
 
 FEATURE_ORDER = [
@@ -74,6 +75,34 @@ def _feature_row(features: Dict[str, Any]) -> List[float]:
         except (TypeError, ValueError):
             row.append(0.0)
     return row
+
+
+def _balanced_accuracy(y_true: List[int], y_prob: List[float], threshold: float = 0.5) -> float:
+    if not y_true:
+        return 0.0
+    preds = [1 if prob >= threshold else 0 for prob in y_prob]
+    tp = sum(1 for yt, yp in zip(y_true, preds) if yt == 1 and yp == 1)
+    tn = sum(1 for yt, yp in zip(y_true, preds) if yt == 0 and yp == 0)
+    fp = sum(1 for yt, yp in zip(y_true, preds) if yt == 0 and yp == 1)
+    fn = sum(1 for yt, yp in zip(y_true, preds) if yt == 1 and yp == 0)
+    pos_total = tp + fn
+    neg_total = tn + fp
+    recall_pos = tp / pos_total if pos_total else 0.0
+    recall_neg = tn / neg_total if neg_total else 0.0
+    return (recall_pos + recall_neg) / 2.0
+
+
+def _state_is_ready(state: Optional[Dict[str, Any]]) -> bool:
+    if not state:
+        return False
+    if int(state.get("trained_on", 0)) < MIN_TRAIN_TRADES:
+        return False
+    if list(state.get("feature_order") or []) != FEATURE_ORDER:
+        return False
+    try:
+        return float(state.get("validation_accuracy", 0.0)) >= MIN_VALIDATION_ACCURACY
+    except (TypeError, ValueError):
+        return False
 
 
 def label_closed_trades(trades):
@@ -161,6 +190,22 @@ def train(trades: list, symbol: Optional[str] = "BTCUSDT") -> None:
     if len(rows) < MIN_TRAIN_TRADES or len(set(labels)) < 2:
         return
 
+    validation_size = max(4, int(round(len(rows) * 0.2)))
+    validation_size = min(validation_size, max(2, len(rows) - 4))
+    if validation_size < 2 or len(rows) - validation_size < 4:
+        return
+
+    train_rows = rows[:-validation_size]
+    train_labels = labels[:-validation_size]
+    val_rows = rows[-validation_size:]
+    val_labels = labels[-validation_size:]
+    if len(set(train_labels)) < 2 or len(set(val_labels)) < 1:
+        return
+
+    positives = sum(train_labels)
+    negatives = len(train_labels) - positives
+    scale_pos_weight = (negatives / positives) if positives > 0 else 1.0
+
     with _TRAIN_LOCK:
         if USING_XGBOOST:
             model = XGBClassifier(
@@ -172,14 +217,29 @@ def train(trades: list, symbol: Optional[str] = "BTCUSDT") -> None:
                 random_state=42,
                 eval_metric="logloss",
                 n_jobs=1,
+                scale_pos_weight=scale_pos_weight,
             )
         else:
             model = XGBClassifier(
                 n_estimators=200,
                 max_depth=4,
                 random_state=42,
+                class_weight="balanced",
             )
-        model.fit(rows, labels)
+        model.fit(train_rows, train_labels)
+
+        validation_accuracy = 0.0
+        validation_positive_rate = 0.0
+        try:
+            proba = model.predict_proba(val_rows)
+            classes = list(getattr(model, "classes_", []))
+            if 1 in classes:
+                index = classes.index(1)
+                y_prob = [float(row[index]) for row in proba]
+                validation_accuracy = _balanced_accuracy(val_labels, y_prob)
+                validation_positive_rate = sum(val_labels) / len(val_labels) if val_labels else 0.0
+        except Exception:
+            validation_accuracy = 0.0
 
         state = {
             "model": model,
@@ -189,6 +249,15 @@ def train(trades: list, symbol: Optional[str] = "BTCUSDT") -> None:
             "model_type": "xgb" if USING_XGBOOST else "rf",
             "symbol": symbol,
             "last_trained_at": datetime.now(timezone.utc).isoformat(),
+            "train_samples": int(len(train_rows)),
+            "validation_trades": int(len(val_rows)),
+            "validation_accuracy": float(validation_accuracy),
+            "validation_positive_rate": float(validation_positive_rate),
+            "validation_threshold": float(MIN_VALIDATION_ACCURACY),
+            "label_balance": {
+                "positive": int(sum(labels)),
+                "negative": int(len(labels) - sum(labels)),
+            },
         }
         path = _model_path(symbol)
         with path.open("wb") as f:
@@ -200,9 +269,7 @@ def train(trades: list, symbol: Optional[str] = "BTCUSDT") -> None:
 
 def predict(features: dict, symbol: Optional[str] = "BTCUSDT") -> float:
     state = _load_state(symbol)
-    if not state or int(state.get("trained_on", 0)) < MIN_TRAIN_TRADES:
-        return 0.5
-    if list(state.get("feature_order") or []) != FEATURE_ORDER:
+    if not _state_is_ready(state):
         return 0.5
 
     model = state.get("model")
@@ -223,4 +290,20 @@ def predict(features: dict, symbol: Optional[str] = "BTCUSDT") -> float:
 
 def is_ready(symbol: Optional[str] = "BTCUSDT") -> bool:
     state = _load_state(symbol)
-    return bool(state and int(state.get("trained_on", 0)) >= MIN_TRAIN_TRADES and list(state.get("feature_order") or []) == FEATURE_ORDER)
+    return _state_is_ready(state)
+
+
+def model_info(symbol: Optional[str] = "BTCUSDT") -> Dict[str, Any]:
+    state = _load_state(symbol) or {}
+    return {
+        "trained_on": int(state.get("trained_on", 0) or 0),
+        "train_samples": int(state.get("train_samples", 0) or 0),
+        "validation_trades": int(state.get("validation_trades", 0) or 0),
+        "validation_accuracy": float(state.get("validation_accuracy", 0.0) or 0.0),
+        "validation_positive_rate": float(state.get("validation_positive_rate", 0.0) or 0.0),
+        "validation_threshold": float(state.get("validation_threshold", MIN_VALIDATION_ACCURACY) or MIN_VALIDATION_ACCURACY),
+        "source_trades": int(state.get("source_trades", 0) or 0),
+        "label_balance": state.get("label_balance", {"positive": 0, "negative": 0}),
+        "last_trained_at": state.get("last_trained_at"),
+        "symbol": _normalize_symbol(symbol),
+    }

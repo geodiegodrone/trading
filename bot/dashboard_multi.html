@@ -2673,11 +2673,14 @@
       const mlConfidence = Number(kpis?.ml_confidence ?? 0.5);
       const mlTrainingTrades = Number(kpis?.ml_training_trades ?? 0);
       const mlMinTrainTrades = Number(kpis?.ml_min_train_trades ?? 20);
+      const mlValidationAccuracy = Number(kpis?.ml_validation_accuracy ?? 0);
+      const mlValidationTrades = Number(kpis?.ml_validation_trades ?? 0);
       const tradeStats = kpis?.trade_stats || {};
       const statsTotal = Number(tradeStats.total ?? tradeCount);
       const statsWins = Number(tradeStats.wins ?? wins);
       const statsLosses = Number(tradeStats.losses ?? losses);
       const statsWinRate = Number(tradeStats.win_rate ?? winRate);
+      const reconciledCount = Number(tradeStats.reconciled ?? 0);
       const statsAvgR = Number(tradeStats.avg_r ?? 0);
       const statsBestR = Number(tradeStats.best_r ?? 0);
       const statsWorstR = Number(tradeStats.worst_r ?? 0);
@@ -2704,15 +2707,15 @@
       if (mlReady) {
         setText('kpiMlStatus', `Active (${mlConfidence.toFixed(2)})`);
         document.getElementById(id(symbol, 'kpiMlStatus')).style.color = mlConfidence >= 0.55 ? 'var(--green)' : 'var(--yellow)';
-        setText('kpiMlHint', `Confidence: ${mlConfidence.toFixed(2)}`);
+        setText('kpiMlHint', `Confidence: ${mlConfidence.toFixed(2)} | Val: ${(mlValidationAccuracy * 100).toFixed(1)}% (${mlValidationTrades})`);
       } else {
         setText('kpiMlStatus', `Training (${Math.min(mlTrainingTrades, mlMinTrainTrades)}/${mlMinTrainTrades} trades)`);
         document.getElementById(id(symbol, 'kpiMlStatus')).style.color = 'var(--yellow)';
-        setText('kpiMlHint', `Waiting for ${mlMinTrainTrades} real closed trades`);
+        setText('kpiMlHint', `Waiting for ${mlMinTrainTrades} real closed trades | Val: ${(mlValidationAccuracy * 100).toFixed(1)}% (${mlValidationTrades})`);
       }
       setText('kpiStats', hasClosedTrades ? `${statsWinRate.toFixed(1)}%` : '--');
       document.getElementById(id(symbol, 'kpiStats')).style.color = statsWinRate >= 60 ? 'var(--green)' : statsWinRate >= 40 ? 'var(--yellow)' : 'var(--red)';
-      setText('kpiStatsHint', hasClosedTrades ? `${statsTotal} trades (${statsWins}W ${statsLosses}L) | R ${statsAvgR.toFixed(2)} / ${statsBestR.toFixed(2)} / ${statsWorstR.toFixed(2)}` : 'Sin historial cerrado todavía');
+      setText('kpiStatsHint', hasClosedTrades ? `${statsTotal} reales (${reconciledCount} reconcil.) | ${statsWins}W ${statsLosses}L | R ${statsAvgR.toFixed(2)} / ${statsBestR.toFixed(2)} / ${statsWorstR.toFixed(2)}` : 'Sin historial cerrado todavía');
 
       const pnlUnrealizedText = formatMoney(pnlUnrealized);
       const tradesSub = document.getElementById(id(symbol, 'kpiTradesSub'));
