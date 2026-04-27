@@ -962,6 +962,34 @@
       font-size: 11px;
     }
 
+    .agent-repair-btn {
+      margin-top: 10px;
+      width: 100%;
+      border-radius: 12px;
+      border: 1px solid rgba(245, 158, 11, 0.22);
+      background: linear-gradient(180deg, rgba(245, 158, 11, 0.16), rgba(245, 158, 11, 0.08));
+      color: #f8fafc;
+      padding: 9px 12px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }
+
+    .agent-repair-btn:hover {
+      transform: translateY(-1px);
+      border-color: rgba(245, 158, 11, 0.38);
+      background: linear-gradient(180deg, rgba(245, 158, 11, 0.22), rgba(245, 158, 11, 0.1));
+    }
+
+    .agent-repair-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+
     .agent-card.busy .agent-status { color: var(--yellow); border-color: rgba(251,191,36,0.2); }
     .agent-card.ok .agent-status { color: var(--green); border-color: rgba(54,211,153,0.2); }
     .agent-card.warn .agent-status { color: var(--red); border-color: rgba(248,113,113,0.2); }
@@ -2504,6 +2532,7 @@
       const activity = String(agent?.activity || 'idle');
       const energy = Math.max(0, Math.min(100, Number(agent?.energy ?? 0)));
       const energyLabel = energy >= 70 ? 'Alto' : energy >= 40 ? 'Medio' : 'Bajo';
+      const canRepair = Boolean(agent?.can_repair);
       return `
         <article class="${agentCardState(agent)}" style="--agent-accent:${agent?.accent || '#7dd3fc'}">
           <div class="agent-card-head">
@@ -2517,6 +2546,7 @@
           <div class="agent-card-metrics">
             ${agentMetricRows(agent)}
           </div>
+          ${canRepair ? '<button class="agent-repair-btn" data-agent-repair="true">Reparar ahora</button>' : ''}
           <div class="agent-bar"><div style="width:${energy}%"></div></div>
           <div class="agent-foot">
             <span>Actividad: ${escapeHtml(agentActivityLabel(activity))}</span>
@@ -2529,6 +2559,11 @@
     function buildAgentsPanel() {
       const grid = document.getElementById('agentsGrid');
       if (!grid) return;
+      grid.onclick = async (event) => {
+        const button = event.target.closest('[data-agent-repair="true"]');
+        if (!button) return;
+        await runRecoveryAction(button);
+      };
       const payload = state.agents || {};
       const agents = Array.isArray(payload?.agents) ? payload.agents : [];
       if (!agents.length) {
@@ -2543,6 +2578,34 @@
       grid.innerHTML = agents.map((agent, index) => agentCardTemplate(agent, index)).join('');
     }
 
+    async function runRecoveryAction(button) {
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = 'Reparando...';
+      try {
+        const response = await fetch('/api/recovery', { method: 'POST' });
+        const payload = await response.json();
+        if (payload) {
+          if (payload.health) {
+            renderHealthReport(payload.health);
+          }
+          await loadLatestHealthCheck();
+          updateActivity({
+            symbol: 'PORTFOLIO',
+            kind: payload.ok ? 'info' : 'warn',
+            message: payload.ok
+              ? 'Recovery Agent: reparación conservadora completada'
+              : `Recovery Agent: reparación ejecutada con ${Array.isArray(payload.issues) ? payload.issues.length : 0} hallazgos`,
+          });
+        }
+      } catch (err) {
+        console.error('Recovery action failed', err);
+      } finally {
+        button.disabled = false;
+        button.textContent = original;
+      }
+    }
+
     function renderAgents(payload) {
       state.agents = payload || {};
       const title = document.getElementById('agentsTitle');
@@ -2552,7 +2615,8 @@
         const r = payload?.summary?.ready_symbols?.length ?? 0;
         const a = payload?.summary?.active_symbols?.length ?? 0;
         const w = payload?.summary?.warnings?.length ?? 0;
-        sub.textContent = `Listos: ${r} | Activos: ${a} | Alertas: ${w}`;
+        const rr = payload?.summary?.recovery_repairs?.length ?? 0;
+        sub.textContent = `Listos: ${r} | Activos: ${a} | Alertas: ${w} | Reparaciones: ${rr}`;
       }
       buildAgentsPanel();
     }

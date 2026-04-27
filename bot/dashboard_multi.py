@@ -495,6 +495,63 @@ def _run_healthcheck():
     return summary
 
 
+def _run_recovery(force_refresh: bool = True):
+    import multi_bot
+
+    started = datetime.now(timezone.utc).isoformat()
+    report = {
+        "timestamp": started,
+        "running": True,
+        "status": "running",
+        "activity": "repairing",
+        "force_refresh": bool(force_refresh),
+        "issues": [],
+        "repairs": [],
+        "counts": {},
+    }
+    _store_recovery_report(report)
+    try:
+        reconcile_report = multi_bot.reconcile_state(force_refresh=force_refresh) or {}
+        report["reconcile"] = reconcile_report
+        report["repairs"] = reconcile_report.get("repairs", []) if isinstance(reconcile_report, dict) else []
+        report["counts"] = reconcile_report.get("counts", {}) if isinstance(reconcile_report, dict) else {}
+        report["issues"] = list((_get_health_report() or {}).get("issues", []))
+        _cache["portfolio"] = _portfolio_payload()
+        _cache["agents"] = _agents_payload()
+        for sym in TAB_SYMBOLS:
+            try:
+                _cache[sym] = _build_symbol_payload(sym)
+            except Exception:
+                pass
+        health = _run_healthcheck()
+        _store_health_report(health)
+        report["health"] = health
+        report["recovery"] = {
+            "before_issues": len(report.get("issues", [])),
+            "after_issues": len(health.get("issues", [])) if isinstance(health, dict) else 0,
+            "notes": [item.get("action") for item in report.get("repairs", []) if item.get("action")],
+        }
+        report["ok"] = bool(health.get("ok")) if isinstance(health, dict) else False
+        report["status"] = "done" if report["ok"] else "warn"
+        report["activity"] = "monitoring" if report["ok"] else "alert"
+        report["running"] = False
+        report["finished_at"] = datetime.now(timezone.utc).isoformat()
+        activity_log.push(
+            "PORTFOLIO",
+            "recovery",
+            "Recovery Agent ejecutó una reparación conservadora y actualizó estado, registry y cache.",
+        )
+        return _store_recovery_report(report)
+    except Exception as exc:
+        report["running"] = False
+        report["status"] = "error"
+        report["activity"] = "alert"
+        report["error"] = str(exc)
+        report["issues"] = report.get("issues") or [str(exc)]
+        activity_log.push("PORTFOLIO", "error", f"Recovery Agent falló: {exc}")
+        return _store_recovery_report(report)
+
+
 def _build_symbol_payload(symbol):
     cfg = get_symbol_config(symbol)
     cfg_timeframe = int(cfg.get("timeframe", os.getenv("TIMEFRAME", "5")))
@@ -665,6 +722,7 @@ def _portfolio_payload():
 
 _cache: dict = {}
 _health_cache: dict = {"report": None}
+_recovery_cache: dict = {"report": None}
 
 
 def _store_health_report(report: dict):
@@ -678,9 +736,21 @@ def _get_health_report():
     return report if isinstance(report, dict) else None
 
 
+def _store_recovery_report(report: dict):
+    _recovery_cache["report"] = report
+    _cache["recovery"] = report
+    return report
+
+
+def _get_recovery_report():
+    report = _recovery_cache.get("report") or _cache.get("recovery")
+    return report if isinstance(report, dict) else None
+
+
 def _agents_payload():
     portfolio = _cache.get("portfolio") or _portfolio_payload()
     health = _get_health_report() or {}
+    recovery = _get_recovery_report() or {}
     symbols = {sym: _cache.get(sym) or {} for sym in SYMBOLS}
     open_positions = portfolio.get("positions", {}) or {}
     trade_gates = {
@@ -690,11 +760,16 @@ def _agents_payload():
     ready_symbols = [sym for sym, gate in trade_gates.items() if gate.get("ready")]
     active_symbols = [sym for sym, pos in open_positions.items() if pos]
     warnings = health.get("issues", []) if isinstance(health, dict) else []
+    recovery_issues = recovery.get("issues", []) if isinstance(recovery, dict) else []
+    recovery_repairs = recovery.get("repairs", []) if isinstance(recovery, dict) else []
     daily_loss = _as_float((portfolio or {}).get("daily_loss_pct"))
     risk_pct = _as_float((portfolio or {}).get("portfolio_risk_pct"))
+    recovery_running = bool(recovery.get("running")) if isinstance(recovery, dict) else False
+    recovery_activity = str(recovery.get("activity") or "monitoring").lower() if isinstance(recovery, dict) else "monitoring"
+    recovery_status = str(recovery.get("status") or "idle").lower() if isinstance(recovery, dict) else "idle"
     return {
         "title": "Agentes auxiliares",
-        "subtitle": "Supervisión pixel art de market, risk, health, execution y reporting.",
+        "subtitle": "Supervisión pixel art de market, risk, health, recovery, execution y reporting.",
         "agents": [
             {
                 "id": "market-scout",
@@ -725,6 +800,34 @@ def _agents_payload():
                     {"label": "risk%", "value": f"{risk_pct:.2f}"},
                     {"label": "daily%", "value": f"{daily_loss:.1f}"},
                 ],
+            },
+            {
+                "id": "recovery-agent",
+                "name": "Recovery Agent",
+                "role": "Repara desajustes y reconstruye el estado seguro desde Binance.",
+                "status": "active" if recovery_running or warnings else "idle",
+                "activity": recovery_activity if recovery_running else ("alert" if warnings else "monitoring"),
+                "task": (
+                    "Reparando registry, DB y snapshots desde Binance."
+                    if recovery_running
+                    else (
+                        "Listo para corregir desajustes del healthcheck con acciones conservadoras."
+                        if warnings
+                        else "Vigilando para reconstruir estado cuando aparezcan desajustes."
+                    )
+                ),
+                "energy": 95 if recovery_running else 80 if warnings else 60,
+                "accent": "#f59e0b",
+                "palette": ["#111827", "#f59e0b", "#fb7185"],
+                "metrics": [
+                    {"label": "issues", "value": len(warnings)},
+                    {"label": "repairs", "value": len(recovery_repairs)},
+                ],
+                "can_repair": True,
+                "action": "repair",
+                "action_label": "Reparar ahora",
+                "action_hint": "Reconcilia Binance, registry, DB y cache con una rutina conservadora.",
+                "status_hint": recovery_status,
             },
             {
                 "id": "health-sentinel",
@@ -776,6 +879,8 @@ def _agents_payload():
             "ready_symbols": ready_symbols,
             "active_symbols": active_symbols,
             "warnings": warnings[:3],
+            "recovery_issues": recovery_issues[:3],
+            "recovery_repairs": recovery_repairs[:3],
         },
     }
 
@@ -836,6 +941,21 @@ async def index():
 async def api_healthcheck():
     report = await asyncio.to_thread(_run_healthcheck)
     return _store_health_report(report)
+
+
+@app.post("/api/recovery")
+async def api_recovery():
+    report = await asyncio.to_thread(_run_recovery)
+    return _store_recovery_report(report)
+
+
+@app.get("/api/recovery/latest")
+async def api_recovery_latest():
+    report = _get_recovery_report()
+    if report is None:
+        report = await asyncio.to_thread(_run_recovery)
+        _store_recovery_report(report)
+    return report
 
 
 @app.get("/api/healthcheck/latest")

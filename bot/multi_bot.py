@@ -385,16 +385,25 @@ def _rebuild_position_from_exchange(symbol, cfg, balance):
     return state_entry
 
 
-def reconcile_state():
+def reconcile_state(force_refresh: bool = False):
+    report = {
+        "force_refresh": bool(force_refresh),
+        "repairs": [],
+        "before": {},
+        "after": {},
+        "counts": {},
+    }
     try:
-        balance = _as_float(binance_broker.get_balance())
+        balance = _as_float(binance_broker.get_balance(force_refresh=force_refresh))
         current = _portfolio_state()
         current_positions = current.get("open_positions", {}) if isinstance(current, dict) else {}
         reconciled_positions = {}
         reconciled_registry = {}
+        before_open_rows = 0
         for symbol in SYMBOLS:
             live_pos = _get_current_position(symbol)
             open_rows = _open_trade_rows(symbol)
+            before_open_rows += len(open_rows)
             local_pos = current_positions.get(symbol)
             registry_trade_id = _open_trade_registry().get(symbol)
             open_rows_sorted = sorted(open_rows, key=lambda row: int(row.get("id") or 0))
@@ -413,10 +422,21 @@ def reconcile_state():
                         if synthetic:
                             rebuilt = synthetic
                             active_trade_id = synthetic.get("trade_id")
+                            report["repairs"].append({
+                                "symbol": symbol,
+                                "action": "register_live_position",
+                                "detail": "Creado registro local y registry desde posicion viva de Binance",
+                            })
                     reconciled_positions[symbol] = rebuilt
                     trade_id = rebuilt.get("trade_id")
                     if trade_id is not None:
                         reconciled_registry[symbol] = trade_id
+                        if registry_trade_id is None or int(registry_trade_id) != int(trade_id):
+                            report["repairs"].append({
+                                "symbol": symbol,
+                                "action": "repair_registry",
+                                "detail": f"open_trade_id sincronizado con trade {trade_id}",
+                            })
                 else:
                     if (
                         not open_rows_sorted
@@ -428,6 +448,11 @@ def reconcile_state():
                             reconciled_positions[symbol] = synthetic
                             reconciled_registry[symbol] = synthetic.get("trade_id")
                             active_trade_id = synthetic.get("trade_id")
+                            report["repairs"].append({
+                                "symbol": symbol,
+                                "action": "register_live_position",
+                                "detail": "Reconstruido registro desde posicion viva sin metadata local",
+                            })
                     if active_trade_id is None and local_pos and local_pos.get("trade_id") is not None:
                         active_trade_id = int(local_pos.get("trade_id"))
                     if active_trade_id is None and registry_trade_id is not None:
@@ -440,6 +465,12 @@ def reconcile_state():
                         continue
                     try:
                         trade_log.reconcile_trade(int(row_id), float(row.get("entry_price") or 0.0))
+                        report["repairs"].append({
+                            "symbol": symbol,
+                            "action": "close_orphan_trade_row",
+                            "trade_id": int(row_id),
+                            "detail": "Fila OPEN huérfana cerrada como reconciliada",
+                        })
                     except Exception as exc:
                         logger.warning("Failed to reconcile orphan trade %s for %s: %s", row_id, symbol, exc)
                 if live_pos and not rebuilt:
@@ -477,6 +508,12 @@ def reconcile_state():
                     elif recovered.get("trade_id") is not None:
                         reconciled_registry[symbol] = int(recovered["trade_id"])
                     reconciled_positions[symbol] = recovered
+                    report["repairs"].append({
+                        "symbol": symbol,
+                        "action": "recover_local_position",
+                        "trade_id": int(active_trade_id) if active_trade_id is not None else None,
+                        "detail": "Estado local reconstruido desde DB/registry",
+                    })
                 for row in open_rows_sorted:
                     row_id = row.get("id")
                     if row_id is None:
@@ -485,16 +522,58 @@ def reconcile_state():
                         continue
                     try:
                         trade_log.reconcile_trade(int(row_id), float(row.get("entry_price") or 0.0))
+                        report["repairs"].append({
+                            "symbol": symbol,
+                            "action": "close_stale_trade_row",
+                            "trade_id": int(row_id),
+                            "detail": "Fila OPEN stale cerrada como reconciliada",
+                        })
                     except Exception as exc:
                         logger.warning("Failed to reconcile stale trade %s for %s: %s", row_id, symbol, exc)
         if not reconciled_positions and not reconciled_registry and not current_positions:
-            return
+            report["counts"] = {
+                "live_positions": 0,
+                "registry_entries": 0,
+                "open_trade_rows_before": before_open_rows,
+                "open_trade_rows_after": before_open_rows,
+            }
+            report["after"] = {"open_positions": {}, "total_risk_pct": 0.0}
+            return report
         state = _calc_portfolio_risk(balance, {"open_positions": reconciled_positions, "total_risk_pct": 0.0})
         _save_portfolio_state(state)
         _save_trade_registry(reconciled_registry)
+        report["after"] = state
+        report["counts"] = {
+            "live_positions": len(reconciled_positions),
+            "registry_entries": len(reconciled_registry),
+            "open_trade_rows_before": before_open_rows,
+            "open_trade_rows_after": len([t for t in trade_log.get_all_trades() if t.get("pnl") is None]),
+        }
         logger.info("State reconciled: %s live positions, %s registry entries", len(reconciled_positions), len(reconciled_registry))
+        return report
     except Exception as exc:
         logger.warning("State reconciliation failed: %s", exc)
+        report["error"] = str(exc)
+        return report
+
+
+def repair_state(force_refresh: bool = True):
+    report = reconcile_state(force_refresh=force_refresh)
+    try:
+        daily = _load_daily_balance()
+        report.setdefault("repairs", []).append({
+            "symbol": "PORTFOLIO",
+            "action": "refresh_daily_balance",
+            "detail": f"daily_balance sincronizado para {daily.get('date')}",
+        })
+        report["daily"] = daily
+    except Exception as exc:
+        report["repairs"].append({
+            "symbol": "PORTFOLIO",
+            "action": "refresh_daily_balance_failed",
+            "detail": str(exc),
+        })
+    return report
 
 
 def _calc_portfolio_risk(balance, state):
