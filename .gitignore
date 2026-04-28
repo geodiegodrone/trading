@@ -24,3 +24,7 @@ __pycache__/
 /bot/open_trade_id.json
 /bot/__pycache__/
 /bot/backtest_walkforward_report.json
+/bot/model.pkl
+/bot/model_*.pkl
+/bot/0.52,
+/bot/0.55,

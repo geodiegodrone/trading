@@ -102,6 +102,7 @@ class Trade:
     side: str
     entry_ts: int
     entry_price: float
+    signal_idx: int | None = None
     exit_ts: int | None = None
     exit_price: float | None = None
     pnl: float = 0.0
@@ -252,7 +253,7 @@ def simulate(df: pd.DataFrame, cfg: Dict[str, float | int], trade_usdt: float) -
             else:
                 sl = entry + sl_dist
                 tp = entry - sl_dist * 2.0
-            open_trade = Trade(side=signal, entry_ts=int(next_row["ts"]), entry_price=entry)
+            open_trade = Trade(side=signal, signal_idx=i, entry_ts=int(next_row["ts"]), entry_price=entry)
             open_qty = qty
             open_sl = sl
             open_tp = tp

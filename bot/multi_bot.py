@@ -948,9 +948,16 @@ def run_symbol(symbol, cfg, shared_stop_event):
             features = {
                 **feature_context,
             }
+            features["side_buy"] = 1.0 if signal == "LONG" else 0.0
             confidence = _ml_confidence(features, symbol)
             ml_threshold = float(cfg.get("ml_threshold", 0.55))
-            activity_log.push(symbol, "ml", f"ML confianza: {confidence:.0%} {'se?al aceptada' if confidence >= ml_threshold else 'se?al rechazada'}")
+            if ml_model.is_ready(symbol):
+                try:
+                    suggested = float(ml_model.model_info(symbol).get("suggested_threshold", ml_threshold) or ml_threshold)
+                    ml_threshold = max(ml_threshold, suggested)
+                except Exception:
+                    pass
+            activity_log.push(symbol, "ml", f"ML confianza: {confidence:.0%} (umbral {ml_threshold:.2f}) {'se?al aceptada' if confidence >= ml_threshold else 'se?al rechazada'}")
             position = _get_current_position(symbol)
             state = _portfolio_state()
             state = _calc_portfolio_risk(balance, state)
