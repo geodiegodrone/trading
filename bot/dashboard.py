@@ -1,7 +1,7 @@
 """Binance dashboard entrypoint.
 
 This keeps the historical `dashboard.py` name working, but the actual app is
-the Binance multi-asset dashboard.
+the Binance BTC-only dashboard.
 """
 
 from dashboard_multi import app

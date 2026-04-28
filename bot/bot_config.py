@@ -4,7 +4,7 @@ import os
 from typing import Dict, List
 
 
-DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "XAUUSDT", "XAGUSDT"]
+DEFAULT_SYMBOLS = ["BTCUSDT"]
 
 DEFAULT_CONFIG: Dict[str, float | int] = {
     "timeframe": int(os.getenv("TIMEFRAME", "5")),
@@ -38,8 +38,7 @@ def normalize_symbol(symbol: str) -> str:
 
 
 def parse_symbols(raw: str | None = None) -> List[str]:
-    value = raw if raw is not None else os.getenv("SYMBOLS", ",".join(DEFAULT_SYMBOLS))
-    return [normalize_symbol(s) for s in value.split(",") if normalize_symbol(s)]
+    return ["BTCUSDT"]
 
 
 def get_symbol_config(symbol: str) -> Dict[str, float | int]:

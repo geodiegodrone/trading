@@ -15,6 +15,7 @@ import activity_log
 import binance_broker
 import market_stream
 from bot_config import get_symbol_config, parse_symbols
+from features import build_features
 import ml_model
 import trade_log
 
@@ -28,8 +29,8 @@ PORTFOLIO_FILE = ROOT / "portfolio_state.json"
 DAILY_FILE = ROOT / "daily_balance.json"
 OPEN_TRADE_FILE = ROOT / "open_trade_id.json"
 
-SYMBOLS = parse_symbols()
-TAB_SYMBOLS = list(SYMBOLS)
+SYMBOLS = ["BTCUSDT"]
+TAB_SYMBOLS = ["BTCUSDT"]
 
 
 def _load_json(path, default):
@@ -598,7 +599,7 @@ def _build_symbol_payload(symbol):
         ml_info = {}
     ml_validation_accuracy = _as_float(ml_info.get("validation_accuracy"), 0.0)
     ml_validation_trades = int(ml_info.get("validation_trades") or 0)
-    features = ml_model.snapshot_features(last, df.tail(10).to_dict("records"), cols)
+    features = build_features(df).iloc[-1].to_dict()
     ml_ready = False
     ml_confidence = 0.5
     try:

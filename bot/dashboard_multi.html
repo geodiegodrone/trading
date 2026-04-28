@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Panel multi-activo del bot de trading</title>
+  <title>Panel BTC del bot de trading</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -341,10 +341,6 @@
       gap: 16px;
       min-width: 0;
     }
-
-    .symbol-panel[data-symbol="ETHUSDT"] { --accent: var(--eth); }
-    .symbol-panel[data-symbol="XRPUSDT"] { --accent: var(--xrp); }
-    .symbol-panel[data-symbol="SOLUSDT"] { --accent: var(--sol); }
 
     .symbol-header {
       display: flex;
@@ -1840,7 +1836,7 @@
       <div class="header-top">
         <div class="title">
           <h1>Panel del bot de trading</h1>
-          <div class="sub">Panel demo multi-activo para Binance</div>
+          <div class="sub">Panel demo BTC-only para Binance</div>
         </div>
         <div class="header-health">
           <div class="health-copy">
@@ -1921,14 +1917,9 @@
   </div>
 
   <script>
-    const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT', 'SOLUSDT', 'XAUUSDT', 'XAGUSDT'];
+    const SYMBOLS = ['BTCUSDT'];
     const SYMBOL_META = {
       BTCUSDT: { label: 'BTC', accent: '#f59e0b' },
-      ETHUSDT: { label: 'ETH', accent: '#60a5fa' },
-      XRPUSDT: { label: 'XRP', accent: '#1d4ed8' },
-      SOLUSDT: { label: 'SOL', accent: '#22c55e' },
-      XAUUSDT: { label: 'XAU', accent: '#d4af37' },
-      XAGUSDT: { label: 'XAG', accent: '#c0c0c0' },
     };
 
     const fmt = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -1940,7 +1931,7 @@
 
     const tabs = document.getElementById('tabs');
     const symbolPanels = document.getElementById('symbolPanels');
-    const SYMBOL_SLUG = { BTCUSDT: 'btc', ETHUSDT: 'eth', XRPUSDT: 'xrp', SOLUSDT: 'sol', XAUUSDT: 'xau', XAGUSDT: 'xag' };
+    const SYMBOL_SLUG = { BTCUSDT: 'btc' };
     const activityBuffers = Object.fromEntries(SYMBOLS.map((symbol) => [shortSymbol(symbol), []]));
     const lwCharts = {};
     const lwSeries = {};

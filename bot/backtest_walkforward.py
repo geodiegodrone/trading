@@ -404,7 +404,7 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--folds", type=int, default=4)
     parser.add_argument("--trade-usdt", type=float, default=50.0)
-    parser.add_argument("--symbols", type=str, default="BTCUSDT,ETHUSDT,XRPUSDT,SOLUSDT,XAUUSDT,XAGUSDT")
+    parser.add_argument("--symbols", type=str, default="BTCUSDT")
     args = parser.parse_args()
 
     symbols = bot_config.parse_symbols(args.symbols)

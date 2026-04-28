@@ -14,6 +14,7 @@ import activity_log
 import binance_broker
 import market_stream
 from bot_config import DEFAULT_CONFIG, get_symbol_config, parse_symbols
+from features import build_features
 import ml_model
 import trade_log
 
@@ -23,13 +24,14 @@ load_dotenv(ROOT / ".env")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("multi_bot")
 
-SYMBOLS = parse_symbols()
+SYMBOLS = ["BTCUSDT"]
 PORTFOLIO_FILE = ROOT / "portfolio_state.json"
 DAILY_FILE = ROOT / "daily_balance.json"
 OPEN_TRADE_FILE = ROOT / "open_trade_id.json"
 
 lock = threading.Lock()
 stop_event = threading.Event()
+ML_RETRAIN_EVERY = max(1, int(os.getenv("ML_RETRAIN_EVERY", "10")))
 
 
 def _load_json(path, default):
@@ -288,8 +290,7 @@ def _register_live_position(symbol, live_pos, cfg, balance):
         if df.empty:
             return None
         last = df.iloc[-1].to_dict()
-        cols = df.attrs.get("indicator_cols", {})
-        feature_context = ml_model.snapshot_features(last, df.tail(10).to_dict("records"), cols)
+        feature_context = build_features(df).iloc[-1].to_dict()
         trade_log.set_trade_context(feature_context.get("candle_body_pct", 0.0))
         side = live_pos.get("side", "Buy")
         qty = _position_size(live_pos)
@@ -305,10 +306,10 @@ def _register_live_position(symbol, live_pos, cfg, balance):
             trade_id = trade_log.log_trade(
                 side,
                 price,
-                _as_float(last.get(cols.get("ema_fast", "ema9"))),
-                _as_float(last.get(cols.get("ema_slow", "ema21"))),
+                _as_float(last.get(df.attrs.get("indicator_cols", {}).get("ema_fast", "ema9"))),
+                _as_float(last.get(df.attrs.get("indicator_cols", {}).get("ema_slow", "ema21"))),
                 _as_float(last.get("rsi")),
-                _as_float(last.get(cols.get("ema_trend", "ema200"))),
+                _as_float(last.get(df.attrs.get("indicator_cols", {}).get("ema_trend", "ema200"))),
                 symbol=symbol,
                 qty=qty,
                 notional_usdt=qty * price,
@@ -325,10 +326,10 @@ def _register_live_position(symbol, live_pos, cfg, balance):
             trade_id = trade_log.log_trade(
                 side,
                 price,
-                _as_float(last.get(cols.get("ema_fast", "ema9"))),
-                _as_float(last.get(cols.get("ema_slow", "ema21"))),
+                _as_float(last.get(df.attrs.get("indicator_cols", {}).get("ema_fast", "ema9"))),
+                _as_float(last.get(df.attrs.get("indicator_cols", {}).get("ema_slow", "ema21"))),
                 _as_float(last.get("rsi")),
-                _as_float(last.get(cols.get("ema_trend", "ema200"))),
+                _as_float(last.get(df.attrs.get("indicator_cols", {}).get("ema_trend", "ema200"))),
                 symbol=symbol,
                 return_3_pct=feature_context.get("return_3_pct", 0.0),
                 return_5_pct=feature_context.get("return_5_pct", 0.0),
@@ -653,12 +654,21 @@ def _ml_confidence(features, symbol):
 def _retrain_if_ready(symbol):
     try:
         stats = trade_log.get_stats(symbol)
-        trades = trade_log.get_all_trades(symbol)
-        try:
-            ml_model.train(trades, symbol)
-        except TypeError:
-            ml_model.train(trades)
-        activity_log.push(symbol, "ml", f"ML reentrenado con {int(stats.get('total', 0))} trades cerrados. Win rate: {float(stats.get('win_rate', 0.0)):.1f}%")
+        closed_trades = int(stats.get("total", 0))
+        if closed_trades <= 0 or closed_trades % ML_RETRAIN_EVERY != 0:
+            return
+        import bootstrap_ml
+
+        result = bootstrap_ml.bootstrap(
+            days=int(os.getenv("ML_BOOTSTRAP_DAYS", "180")),
+            symbol=symbol,
+            quiet=True,
+        )
+        activity_log.push(
+            symbol,
+            "ml",
+            f"Meta-ML reentrenado | trades={closed_trades} | sharpe={float(result.get('val_sharpe', 0.0)):.2f} | tau={float(result.get('suggested_threshold', 0.55)):.3f}",
+        )
     except Exception as exc:
         logger.warning("ML retrain failed for %s: %s", symbol, exc)
 
@@ -768,7 +778,7 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt):
             logger.warning("open_short failed for %s: %s", symbol, exc)
             return
     cols = df.attrs.get("indicator_cols", {})
-    feature_context = ml_model.snapshot_features(last, df.tail(10).to_dict("records"), cols)
+    feature_context = build_features(df).iloc[-1].to_dict()
     trade_log.set_trade_context(feature_context.get("candle_body_pct", 0.0))
     trade_id = None
     try:
@@ -930,8 +940,9 @@ def run_symbol(symbol, cfg, shared_stop_event):
             if df.empty or len(df) < 50:
                 time.sleep(5)
                 continue
+            feature_frame = build_features(df)
             last = df.iloc[-1].to_dict()
-            feature_context = ml_model.snapshot_features(last, df.tail(10).to_dict("records"), df.attrs.get("indicator_cols", {}))
+            feature_context = feature_frame.iloc[-1].to_dict()
             signal = evaluate_signal(last, df, cfg)
             cols = df.attrs.get("indicator_cols", {})
             ema_fast = _as_float(last.get(cols.get("ema_fast", "ema9")))
@@ -949,6 +960,10 @@ def run_symbol(symbol, cfg, shared_stop_event):
                 **feature_context,
             }
             features["side_buy"] = 1.0 if signal == "LONG" else 0.0
+            features["supertrend_aligned_side"] = 1.0 if (
+                (features["side_buy"] >= 0.5 and _as_float(features.get("supertrend_direction")) > 0)
+                or (features["side_buy"] < 0.5 and _as_float(features.get("supertrend_direction")) < 0)
+            ) else 0.0
             confidence = _ml_confidence(features, symbol)
             ml_threshold = float(cfg.get("ml_threshold", 0.55))
             if ml_model.is_ready(symbol):

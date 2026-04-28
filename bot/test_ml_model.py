@@ -1,115 +1,61 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import os
 
+os.environ["ML_MIN_VAL_SHARPE"] = "0.5"
+
+import numpy as np
+import pandas as pd
+
+import backtest_walkforward as bwf
+import bootstrap_ml
 import ml_model
-
-
-def _make_trade(index: int, win: bool) -> dict:
-    base_time = datetime(2025, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=index)
-    if win:
-        trade = {
-            "entry_price": 100.0,
-            "ema9": 110.0,
-            "ema21": 100.0,
-            "ema200": 90.0,
-            "rsi": 80.0,
-            "adx": 30.0,
-            "supertrend_dir": 1,
-            "volume_ratio": 2.0,
-            "atr_pct": 0.5,
-            "return_1_pct": 2.0,
-            "return_2_pct": 2.0,
-            "return_3_pct": 2.0,
-            "return_4_pct": 2.0,
-            "return_5_pct": 2.0,
-            "range_1_pct": 1.0,
-            "range_2_pct": 1.0,
-            "range_3_pct": 1.0,
-            "range_5_pct": 1.0,
-            "body_1_pct": 0.8,
-            "body_2_pct": 0.8,
-            "body_3_pct": 0.8,
-            "body_avg_3_pct": 0.8,
-            "volume_trend_1": 1.5,
-            "volume_trend_2": 1.5,
-            "volume_trend_3": 1.5,
-            "volume_trend_3_ratio": 1.5,
-            "close_pos_5": 0.8,
-            "ema9_slope_3_pct": 0.5,
-            "side": "Buy",
-            "r_multiple": 1.5,
-            "pnl": 1.5,
-            "result": "WIN",
-        }
-    else:
-        trade = {
-            "entry_price": 100.0,
-            "ema9": 90.0,
-            "ema21": 100.0,
-            "ema200": 110.0,
-            "rsi": 20.0,
-            "adx": 30.0,
-            "supertrend_dir": -1,
-            "volume_ratio": 0.5,
-            "atr_pct": 0.5,
-            "return_1_pct": -2.0,
-            "return_2_pct": -2.0,
-            "return_3_pct": -2.0,
-            "return_4_pct": -2.0,
-            "return_5_pct": -2.0,
-            "range_1_pct": 1.0,
-            "range_2_pct": 1.0,
-            "range_3_pct": 1.0,
-            "range_5_pct": 1.0,
-            "body_1_pct": 0.8,
-            "body_2_pct": 0.8,
-            "body_3_pct": 0.8,
-            "body_avg_3_pct": 0.8,
-            "volume_trend_1": 0.5,
-            "volume_trend_2": 0.5,
-            "volume_trend_3": 0.5,
-            "volume_trend_3_ratio": 0.5,
-            "close_pos_5": 0.2,
-            "ema9_slope_3_pct": -0.5,
-            "side": "Sell",
-            "r_multiple": -1.0,
-            "pnl": -1.0,
-            "result": "LOSS",
-        }
-    trade.update(
-        {
-            "ts": base_time.isoformat(),
-            "id": index + 1,
-            "symbol": "BTCUSDT",
-            "qty": 0.01,
-            "notional_usdt": 1.0,
-            "risk_usdt": 1.0,
-            "candle_body_pct": 0.8,
-        }
-    )
-    return trade
+import multi_bot
 
 
 def main() -> None:
-    trades = []
-    for index in range(120):
-        trades.append(_make_trade(index, win=(index % 2 == 0)))
+    symbol = "BTCUSDT"
+    cfg = multi_bot._get_symbol_config(symbol)
+    df = bwf.fetch_history(symbol, int(cfg.get("timeframe", 5)), days=60)
+    df = multi_bot._compute_indicators(df, cfg)
+    signals = bootstrap_ml._primary_signals(df, cfg)
+    assert not signals.empty, "expected primary signals"
 
-    ml_model.train(trades, symbol="BTCUSDT")
+    log_returns = np.log(pd.to_numeric(df["close"], errors="coerce").replace(0.0, np.nan)).diff().fillna(0.0)
+    h = float(log_returns.tail(60).std(ddof=0) * 2.0)
+    cusum_events = set(ml_model.cusum_filter(log_returns.tolist(), h))
+    signals = signals[signals["signal_idx"].isin(cusum_events)].reset_index(drop=True)
+    assert not signals.empty, "expected cusum-filtered events"
 
-    assert ml_model.is_ready("BTCUSDT"), "model should be ready after training"
+    labels = ml_model.apply_triple_barrier(
+        df,
+        signals,
+        atr_mult=float(cfg.get("atr_mult", 1.5)),
+        tp_ratio=2.0,
+        t_bars=24,
+    )
+    assert not labels.empty, "expected triple-barrier labels"
 
-    info = ml_model.model_info("BTCUSDT")
-    assert info["trained_on"] >= 50, info
+    ml_model.train(labels, symbol=symbol, df_klines=df)
 
-    winning_trade = _make_trade(120, win=True)
-    winning_features = ml_model.features_from_trade_row(winning_trade)
+    assert ml_model.is_ready(symbol), "model should be ready after bootstrap"
+    info = ml_model.model_info(symbol)
+    assert float(info["val_sharpe"]) > 0.5, info
+    assert 0.40 <= float(info["suggested_threshold"]) <= 0.75, info
 
-    score = ml_model.predict(winning_features, symbol="BTCUSDT")
-    assert score > 0.5, score
+    feature_frame = ml_model.snapshot_features(df.iloc[-1].to_dict(), df.tail(80).to_dict("records"), df.attrs.get("indicator_cols", {}))
+    feature_frame["side_buy"] = 1.0
+    feature_frame["supertrend_aligned_side"] = 1.0 if feature_frame.get("supertrend_direction", 0.0) > 0 else 0.0
+    score = ml_model.predict(feature_frame, symbol=symbol)
+    assert 0.0 <= score <= 1.0, score
 
-    print("smoke_ok", info["trained_on"], f"{score:.3f}")
+    print(
+        "test_ok",
+        f"val_sharpe={info['val_sharpe']:.3f}",
+        f"val_auc={info['val_auc']:.3f}",
+        f"tau={info['suggested_threshold']:.3f}",
+        f"score={score:.3f}",
+    )
 
 
 if __name__ == "__main__":
