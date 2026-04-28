@@ -32,6 +32,8 @@ OPEN_TRADE_FILE = ROOT / "open_trade_id.json"
 lock = threading.Lock()
 stop_event = threading.Event()
 ML_RETRAIN_EVERY = max(1, int(os.getenv("ML_RETRAIN_EVERY", "10")))
+ML_THRESHOLD_OVERRIDE = os.getenv("ML_THRESHOLD_OVERRIDE")
+_ML_NOT_READY_STATE = {}
 
 
 def _load_json(path, default):
@@ -966,13 +968,29 @@ def run_symbol(symbol, cfg, shared_stop_event):
             ) else 0.0
             confidence = _ml_confidence(features, symbol)
             ml_threshold = float(cfg.get("ml_threshold", 0.55))
-            if ml_model.is_ready(symbol):
-                try:
-                    suggested = float(ml_model.model_info(symbol).get("suggested_threshold", ml_threshold) or ml_threshold)
-                    ml_threshold = max(ml_threshold, suggested)
-                except Exception:
-                    pass
-            activity_log.push(symbol, "ml", f"ML confianza: {confidence:.0%} (umbral {ml_threshold:.2f}) {'se?al aceptada' if confidence >= ml_threshold else 'se?al rechazada'}")
+            ml_ready = False
+            ml_info = {}
+            try:
+                ml_ready = bool(ml_model.is_ready(symbol))
+                ml_info = ml_model.model_info(symbol)
+            except Exception:
+                ml_ready = False
+                ml_info = {}
+            if ML_THRESHOLD_OVERRIDE not in (None, ""):
+                ml_threshold = float(ML_THRESHOLD_OVERRIDE)
+            elif ml_ready:
+                ml_threshold = float(ml_info.get("suggested_threshold", cfg["ml_threshold"]))
+            else:
+                ml_threshold = float(cfg["ml_threshold"])
+                not_ready_reason = str(ml_info.get("not_ready_reason") or "gates de validación no cumplidas")
+                if _ML_NOT_READY_STATE.get(symbol) != not_ready_reason:
+                    activity_log.push(symbol, "ml", f"Modelo no listo: {not_ready_reason}; usando heurística cfg")
+                    _ML_NOT_READY_STATE[symbol] = not_ready_reason
+            if ml_ready:
+                _ML_NOT_READY_STATE.pop(symbol, None)
+                activity_log.push(symbol, "ml", f"ML confianza: {confidence:.0%} (umbral {ml_threshold:.2f}) {'se?al aceptada' if confidence >= ml_threshold else 'se?al rechazada'}")
+            else:
+                activity_log.push(symbol, "ml", f"ML warming: proba={confidence:.0%} | gate inactivo | cfg={ml_threshold:.2f}")
             position = _get_current_position(symbol)
             state = _portfolio_state()
             state = _calc_portfolio_risk(balance, state)
@@ -984,7 +1002,7 @@ def run_symbol(symbol, cfg, shared_stop_event):
             if signal == "NEUTRAL":
                 time.sleep(5)
                 continue
-            if confidence < ml_threshold and ml_model.is_ready(symbol):
+            if confidence < ml_threshold and ml_ready:
                 time.sleep(5)
                 continue
             trade_usdt = _kelly_trade_usdt(balance)

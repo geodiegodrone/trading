@@ -32,7 +32,14 @@ MODEL_PATH = BASE_DIR / "model_BTCUSDT.pkl"
 _TRAIN_LOCK = threading.Lock()
 
 MIN_TRAIN_TRADES = int(os.getenv("ML_MIN_TRAIN_TRADES", "20"))
-MIN_VAL_SHARPE = float(os.getenv("ML_MIN_VAL_SHARPE", "0.8"))
+MIN_VAL_SHARPE = float(os.getenv("ML_MIN_VAL_SHARPE", "0.5"))
+MIN_VAL_AUC = float(os.getenv("ML_MIN_VAL_AUC", "0.55"))
+MIN_COVERAGE_PCT = float(os.getenv("ML_MIN_COVERAGE_PCT", "5.0"))
+MAX_COVERAGE_PCT = float(os.getenv("ML_MAX_COVERAGE_PCT", "60.0"))
+MIN_VALIDATION_TRADES = int(os.getenv("ML_MIN_VALIDATION_TRADES", "30"))
+MIN_FOLD_POSITIVES = int(os.getenv("ML_MIN_FOLD_POSITIVES", "15"))
+MIN_THRESHOLD = float(os.getenv("ML_MIN_THRESHOLD", "0.45"))
+MAX_THRESHOLD = float(os.getenv("ML_MAX_THRESHOLD", "0.70"))
 T_BARS = int(os.getenv("ML_T_BARS", "24"))
 ATR_MULT = float(os.getenv("ML_ATR_MULT", "1.5"))
 TP_RATIO = float(os.getenv("ML_TP_RATIO", "2.0"))
@@ -85,6 +92,20 @@ def _annualized_sharpe(r_values: Sequence[float], holding_bars: Sequence[float],
     bars_per_year = (365.0 * 24.0 * 60.0) / float(bar_minutes)
     trades_per_year = bars_per_year / avg_hold
     return (mean_r / std_r) * math.sqrt(trades_per_year)
+
+
+def _trades_per_year_estimate(holding_bars: Sequence[float], signal_idx: Sequence[int] | None = None, bar_minutes: int = 5) -> float:
+    holds = [max(1.0, _safe_float(v, 1.0)) for v in holding_bars or []]
+    if not holds:
+        return 0.0
+    bars_per_year = (365.0 * 24.0 * 60.0) / float(bar_minutes)
+    avg_hold = float(np.mean(holds))
+    by_holding = bars_per_year / avg_hold if avg_hold > 0 else 0.0
+    if signal_idx:
+        span = max(1.0, float(max(signal_idx) - min(signal_idx) + 1))
+        empirical = (len(holds) / span) * bars_per_year
+        return float(min(by_holding, empirical))
+    return float(by_holding)
 
 
 def _max_drawdown(r_values: Sequence[float]) -> float:
@@ -209,6 +230,9 @@ class FoldMetrics:
     sharpe: float
     max_drawdown: float
     trades: int
+    coverage_pct: float
+    positives: int
+    degenerate: bool
 
 
 class PurgedKFold:
@@ -260,7 +284,9 @@ def _uniqueness_weights(signal_idx: Sequence[int], exit_idx: Sequence[int]) -> n
     return np.asarray(weights, dtype=float)
 
 
-def _build_model() -> Any:
+def _build_model(y_train: np.ndarray | None = None) -> Any:
+    positives = int(np.sum(y_train)) if y_train is not None else 0
+    negatives = int(len(y_train) - positives) if y_train is not None else 0
     if USING_LIGHTGBM:
         return LGBMClassifier(
             n_estimators=600,
@@ -275,6 +301,7 @@ def _build_model() -> Any:
             reg_lambda=0.5,
             objective="binary",
             metric="auc",
+            is_unbalance=True,
             random_state=42,
             verbose=-1,
         )
@@ -288,6 +315,7 @@ def _build_model() -> Any:
         reg_lambda=0.5,
         objective="binary:logistic",
         eval_metric="auc",
+        scale_pos_weight=max(1.0, float(negatives) / float(positives)) if positives > 0 else 1.0,
         random_state=42,
         n_jobs=1,
     )
@@ -301,7 +329,7 @@ def _fit_model(
     w_train: np.ndarray | None = None,
     w_valid: np.ndarray | None = None,
 ) -> Any:
-    model = _build_model()
+    model = _build_model(y_train)
     train_frame = pd.DataFrame(x_train, columns=FEATURE_COLUMNS)
     valid_frame = pd.DataFrame(x_valid, columns=FEATURE_COLUMNS)
     if USING_LIGHTGBM:
@@ -335,32 +363,92 @@ def _optimize_threshold(
     labels: Sequence[int],
     r_values: Sequence[float],
     holding_bars: Sequence[float],
-) -> Tuple[float, float, int]:
-    best_tau = 0.55
-    best_sharpe = -999.0
-    best_count = 0
-    for tau in np.arange(0.40, 0.751, 0.005):
-        selected = [(r, h) for p, r, h in zip(probs, r_values, holding_bars) if p >= tau]
-        if not selected:
-            continue
-        sharpe = _annualized_sharpe([r for r, _ in selected], [h for _, h in selected])
-        if sharpe > best_sharpe:
-            best_tau = float(round(tau, 3))
-            best_sharpe = sharpe
-            best_count = len(selected)
-    if best_count >= 30:
-        return best_tau, best_sharpe, best_count
-    best_f1_tau = 0.55
-    best_f1 = -1.0
-    for tau in np.arange(0.40, 0.751, 0.005):
-        preds = [1 if p >= tau else 0 for p in probs]
-        score = f1_score(labels, preds, zero_division=0)
-        if score > best_f1:
-            best_f1 = score
-            best_f1_tau = float(round(tau, 3))
-    selected = [(r, h) for p, r, h in zip(probs, r_values, holding_bars) if p >= best_f1_tau]
-    sharpe = _annualized_sharpe([r for r, _ in selected], [h for _, h in selected]) if selected else 0.0
-    return best_f1_tau, sharpe, len(selected)
+    signal_idx: Sequence[int] | None = None,
+) -> Dict[str, float]:
+    candidates = np.arange(MIN_THRESHOLD, MAX_THRESHOLD + 0.0001, 0.005)
+    best: Dict[str, float] | None = None
+    fallback: Dict[str, float] | None = None
+    for tau in candidates:
+        mask = np.asarray(probs) >= tau
+        selected_r = np.asarray(r_values, dtype=float)[mask]
+        selected_h = np.asarray(holding_bars, dtype=float)[mask]
+        selected_idx = np.asarray(signal_idx, dtype=int)[mask].tolist() if signal_idx is not None else []
+        trade_count = int(mask.sum())
+        coverage_pct = (trade_count / max(1, len(probs))) * 100.0
+        preds = np.where(mask, 1, 0)
+        f1 = f1_score(labels, preds, zero_division=0)
+        if trade_count > 0:
+            expected_r = float(np.mean(selected_r))
+            std_r = float(np.std(selected_r, ddof=1)) if trade_count > 1 else 0.0
+            sharpe = _annualized_sharpe(selected_r.tolist(), selected_h.tolist())
+            drawdown = _max_drawdown(selected_r.tolist())
+            trades_per_year = _trades_per_year_estimate(selected_h.tolist(), selected_idx)
+        else:
+            expected_r = 0.0
+            std_r = 0.0
+            sharpe = 0.0
+            drawdown = 0.0
+            trades_per_year = 0.0
+        row = {
+            "tau": float(round(tau, 3)),
+            "score": float(expected_r * math.sqrt(max(1, trade_count)) - 0.5 * std_r),
+            "sharpe": float(sharpe),
+            "trades": float(trade_count),
+            "coverage_pct": float(coverage_pct),
+            "f1": float(f1),
+            "drawdown": float(drawdown),
+            "trades_per_year": float(trades_per_year),
+        }
+        if trade_count >= MIN_VALIDATION_TRADES and (best is None or row["score"] > best["score"]):
+            best = row
+        if fallback is None or row["f1"] > fallback["f1"] or (row["f1"] == fallback["f1"] and row["tau"] > fallback["tau"]):
+            fallback = row
+    selected = best or fallback or {
+        "tau": 0.55,
+        "score": 0.0,
+        "sharpe": 0.0,
+        "trades": 0.0,
+        "coverage_pct": 0.0,
+        "f1": 0.0,
+        "drawdown": 0.0,
+        "trades_per_year": 0.0,
+    }
+    return {
+        "tau": float(selected["tau"]),
+        "val_sharpe": float(selected["sharpe"]),
+        "validation_trades": int(selected["trades"]),
+        "coverage_pct": float(selected["coverage_pct"]),
+        "min_trades_per_year_estimate": float(selected["trades_per_year"]),
+        "fallback_to_f1": bool(best is None),
+    }
+
+
+def _median_or_zero(values: Sequence[float]) -> float:
+    clean = [float(v) for v in values if v is not None and not math.isnan(float(v)) and not math.isinf(float(v))]
+    return float(np.median(clean)) if clean else 0.0
+
+
+def _mean_or_zero(values: Sequence[float]) -> float:
+    clean = [float(v) for v in values if v is not None and not math.isnan(float(v)) and not math.isinf(float(v))]
+    return float(np.mean(clean)) if clean else 0.0
+
+
+def _readiness_reason(state: Dict[str, Any]) -> str:
+    reasons: List[str] = []
+    if int(state.get("trained_on", 0) or 0) < MIN_TRAIN_TRADES:
+        reasons.append(f"faltan muestras ({int(state.get('trained_on', 0) or 0)}/{MIN_TRAIN_TRADES})")
+    if int(state.get("usable_folds", 0) or 0) <= 0:
+        reasons.append("sin folds válidos no degenerados")
+    if float(state.get("val_sharpe", 0.0) or 0.0) < MIN_VAL_SHARPE:
+        reasons.append(f"sharpe mediano < {MIN_VAL_SHARPE:.2f}")
+    if float(state.get("val_auc", 0.0) or 0.0) < MIN_VAL_AUC:
+        reasons.append(f"auc < {MIN_VAL_AUC:.2f}")
+    coverage_pct = float(state.get("coverage_pct", 0.0) or 0.0)
+    if coverage_pct < MIN_COVERAGE_PCT:
+        reasons.append(f"coverage < {MIN_COVERAGE_PCT:.1f}%")
+    if coverage_pct > MAX_COVERAGE_PCT:
+        reasons.append(f"coverage > {MAX_COVERAGE_PCT:.1f}%")
+    return "; ".join(reasons)
 
 
 def _serialize_state(state: Dict[str, Any]) -> None:
@@ -522,7 +610,6 @@ def _train_bootstrap(events: pd.DataFrame, df_klines: pd.DataFrame) -> Dict[str,
     oof_probs = np.zeros(len(dataset), dtype=float)
     scored_mask = np.zeros(len(dataset), dtype=bool)
     folds: List[FoldMetrics] = []
-    valid_fold_count = 0
 
     for fold_id, (train_idx, test_idx) in enumerate(splitter.split(dataset), start=1):
         if len(train_idx) < 40 or len(test_idx) < 5:
@@ -539,18 +626,22 @@ def _train_bootstrap(events: pd.DataFrame, df_klines: pd.DataFrame) -> Dict[str,
             weights[fit_idx],
             weights[early_idx],
         )
-        raw_test_probs = _positive_proba(model, x[test_idx])
+        calib_raw = _positive_proba(model, x[early_idx])
         calibrator = IsotonicRegression(out_of_bounds="clip")
-        calibrator.fit(raw_test_probs, y[test_idx])
+        calibrator.fit(calib_raw, y[early_idx])
+        raw_test_probs = _positive_proba(model, x[test_idx])
         test_probs = calibrator.predict(raw_test_probs)
         oof_probs[test_idx] = test_probs
         scored_mask[test_idx] = True
+        positives = int(y[test_idx].sum())
+        degenerate = positives < MIN_FOLD_POSITIVES
         auc = roc_auc_score(y[test_idx], test_probs) if len(np.unique(y[test_idx])) > 1 else 0.5
         preds = (test_probs >= 0.5).astype(int)
         f1 = f1_score(y[test_idx], preds, zero_division=0)
         selected = test_probs >= 0.5
         selected_r = r_values[test_idx][selected]
         selected_h = holding_bars[test_idx][selected]
+        selected_count = int(selected.sum())
         sharpe = _annualized_sharpe(selected_r.tolist(), selected_h.tolist()) if len(selected_r) else 0.0
         drawdown = _max_drawdown(selected_r.tolist()) if len(selected_r) else 0.0
         folds.append(
@@ -560,31 +651,38 @@ def _train_bootstrap(events: pd.DataFrame, df_klines: pd.DataFrame) -> Dict[str,
                 f1=float(f1),
                 sharpe=float(sharpe),
                 max_drawdown=float(drawdown),
-                trades=int(len(test_idx)),
+                trades=selected_count,
+                coverage_pct=(selected_count / max(1, len(test_idx))) * 100.0,
+                positives=positives,
+                degenerate=degenerate,
             )
         )
-        valid_fold_count += 1
 
-    if valid_fold_count == 0:
+    if not folds:
         return {}
 
     scored_probs = oof_probs[scored_mask]
     scored_y = y[scored_mask]
     scored_r = r_values[scored_mask]
     scored_h = holding_bars[scored_mask]
-    suggested_threshold, val_sharpe, threshold_trades = _optimize_threshold(
+    scored_signal_idx = signal_idx[scored_mask]
+    threshold_info = _optimize_threshold(
         scored_probs.tolist(),
         scored_y.tolist(),
         scored_r.tolist(),
         scored_h.tolist(),
+        scored_signal_idx.tolist(),
     )
+    suggested_threshold = float(threshold_info["tau"])
     preds = (scored_probs >= suggested_threshold).astype(int)
-    val_auc = roc_auc_score(scored_y, scored_probs) if len(np.unique(scored_y)) > 1 else 0.5
-    val_f1 = f1_score(scored_y, preds, zero_division=0)
+    usable_folds = [fold for fold in folds if not fold.degenerate]
+    val_auc = _mean_or_zero([fold.auc for fold in usable_folds])
+    val_f1 = _median_or_zero([fold.f1 for fold in usable_folds])
+    val_sharpe = _median_or_zero([fold.sharpe for fold in usable_folds])
+    val_drawdown = _median_or_zero([fold.max_drawdown for fold in usable_folds])
     selected = scored_probs >= suggested_threshold
     selected_r = scored_r[selected]
-    selected_h = scored_h[selected]
-    val_drawdown = _max_drawdown(selected_r.tolist()) if len(selected_r) else 0.0
+    coverage_pct = (float(selected.sum()) / max(1, int(scored_mask.sum()))) * 100.0
 
     full_idx = np.arange(len(dataset))
     fit_idx, valid_idx = _chronological_validation_split(full_idx)
@@ -600,7 +698,7 @@ def _train_bootstrap(events: pd.DataFrame, df_klines: pd.DataFrame) -> Dict[str,
     final_calibrator = IsotonicRegression(out_of_bounds="clip")
     final_calibrator.fit(valid_raw, y[valid_idx])
 
-    return {
+    state = {
         "model": final_model,
         "calibrator": final_calibrator,
         "trained_on": int(len(dataset)),
@@ -614,7 +712,9 @@ def _train_bootstrap(events: pd.DataFrame, df_klines: pd.DataFrame) -> Dict[str,
         "val_auc": float(val_auc),
         "val_f1": float(val_f1),
         "val_drawdown": float(val_drawdown),
-        "validation_trades": int(threshold_trades),
+        "validation_trades": int(threshold_info["validation_trades"]),
+        "coverage_pct": float(coverage_pct),
+        "min_trades_per_year_estimate": float(threshold_info["min_trades_per_year_estimate"]),
         "calibrated": True,
         "fold_metrics": [fold.__dict__ for fold in folds],
         "label_balance": {
@@ -622,8 +722,14 @@ def _train_bootstrap(events: pd.DataFrame, df_klines: pd.DataFrame) -> Dict[str,
             "negative": int(len(y) - y.sum()),
         },
         "oof_count": int(scored_mask.sum()),
+        "usable_folds": int(len(usable_folds)),
+        "fallback_to_f1": bool(threshold_info["fallback_to_f1"]),
         "model_type": "lightgbm" if USING_LIGHTGBM else "xgboost",
     }
+    state["ready"] = False
+    state["not_ready_reason"] = _readiness_reason(state)
+    state["ready"] = not bool(state["not_ready_reason"])
+    return state
 
 
 def _train_legacy(trades: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
@@ -640,18 +746,21 @@ def _train_legacy(trades: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     calibrator = IsotonicRegression(out_of_bounds="clip")
     calibrator.fit(valid_raw, y[valid_idx])
     valid_probs = calibrator.predict(valid_raw)
-    suggested_threshold, val_sharpe, threshold_trades = _optimize_threshold(
+    threshold_info = _optimize_threshold(
         valid_probs.tolist(),
         y[valid_idx].tolist(),
         dataset.iloc[valid_idx]["r_multiple"].astype(float).tolist(),
         dataset.iloc[valid_idx]["holding_bars"].astype(float).tolist(),
+        dataset.iloc[valid_idx]["signal_idx"].astype(int).tolist(),
     )
+    suggested_threshold = float(threshold_info["tau"])
     preds = (np.asarray(valid_probs) >= suggested_threshold).astype(int)
     val_auc = roc_auc_score(y[valid_idx], valid_probs) if len(np.unique(y[valid_idx])) > 1 else 0.5
     val_f1 = f1_score(y[valid_idx], preds, zero_division=0)
     selected = np.asarray(valid_probs) >= suggested_threshold
     val_drawdown = _max_drawdown(dataset.iloc[valid_idx]["r_multiple"].astype(float)[selected].tolist())
-    return {
+    coverage_pct = (float(selected.sum()) / max(1, len(valid_idx))) * 100.0
+    state = {
         "model": model,
         "calibrator": calibrator,
         "trained_on": int(len(dataset)),
@@ -665,7 +774,9 @@ def _train_legacy(trades: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         "val_auc": float(val_auc),
         "val_f1": float(val_f1),
         "val_drawdown": float(val_drawdown),
-        "validation_trades": int(threshold_trades),
+        "validation_trades": int(threshold_info["validation_trades"]),
+        "coverage_pct": float(coverage_pct),
+        "min_trades_per_year_estimate": float(threshold_info["min_trades_per_year_estimate"]),
         "calibrated": True,
         "fold_metrics": [],
         "label_balance": {
@@ -673,8 +784,14 @@ def _train_legacy(trades: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
             "negative": int(len(y) - y.sum()),
         },
         "oof_count": int(len(valid_idx)),
+        "usable_folds": 1,
+        "fallback_to_f1": bool(threshold_info["fallback_to_f1"]),
         "model_type": "lightgbm" if USING_LIGHTGBM else "xgboost",
     }
+    state["ready"] = False
+    state["not_ready_reason"] = _readiness_reason(state)
+    state["ready"] = not bool(state["not_ready_reason"])
+    return state
 
 
 def train(
@@ -697,7 +814,9 @@ def train(
             f"[ml_model] BTCUSDT trained={state['trained_on']} "
             f"val_sharpe={state['val_sharpe']:.3f} "
             f"val_auc={state['val_auc']:.3f} "
-            f"suggested_threshold={state['suggested_threshold']:.3f}"
+            f"suggested_threshold={state['suggested_threshold']:.3f} "
+            f"coverage={float(state.get('coverage_pct', 0.0)):.1f}% "
+            f"ready={bool(state.get('ready'))}"
         )
 
 
@@ -721,10 +840,10 @@ def predict(features_dict: Dict[str, Any], symbol: Optional[str] = "BTCUSDT") ->
 def is_ready(symbol: Optional[str] = "BTCUSDT") -> bool:
     _normalize_symbol(symbol)
     state = _load_state()
-    return (
-        int(state.get("trained_on", 0) or 0) >= MIN_TRAIN_TRADES
-        and float(state.get("val_sharpe", 0.0) or 0.0) >= MIN_VAL_SHARPE
-    )
+    if not state:
+        return False
+    reason = str(state.get("not_ready_reason") or _readiness_reason(state))
+    return not bool(reason)
 
 
 def model_info(symbol: Optional[str] = "BTCUSDT") -> Dict[str, Any]:
@@ -742,6 +861,8 @@ def model_info(symbol: Optional[str] = "BTCUSDT") -> Dict[str, Any]:
         "val_f1": float(state.get("val_f1", 0.0) or 0.0),
         "val_drawdown": float(state.get("val_drawdown", 0.0) or 0.0),
         "suggested_threshold": float(state.get("suggested_threshold", 0.55) or 0.55),
+        "coverage_pct": float(state.get("coverage_pct", 0.0) or 0.0),
+        "min_trades_per_year_estimate": float(state.get("min_trades_per_year_estimate", 0.0) or 0.0),
         "calibrated": bool(state.get("calibrated", False)),
         "feature_count": int(state.get("feature_count", len(FEATURE_COLUMNS)) or len(FEATURE_COLUMNS)),
         "feature_order": list(state.get("feature_order") or FEATURE_COLUMNS),
@@ -750,4 +871,8 @@ def model_info(symbol: Optional[str] = "BTCUSDT") -> Dict[str, Any]:
         "fold_metrics": state.get("fold_metrics", []),
         "model_type": state.get("model_type", "lightgbm" if USING_LIGHTGBM else "xgboost"),
         "ready_threshold": MIN_VAL_SHARPE,
+        "ready": bool(is_ready(symbol)),
+        "not_ready_reason": str(state.get("not_ready_reason") or _readiness_reason(state)),
+        "usable_folds": int(state.get("usable_folds", 0) or 0),
+        "fallback_to_f1": bool(state.get("fallback_to_f1", False)),
     }
