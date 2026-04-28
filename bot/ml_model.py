@@ -483,6 +483,7 @@ def _prepare_training_set(events: pd.DataFrame, df_klines: pd.DataFrame) -> pd.D
         side = _coerce_side(event["side"])
         side_buy = 1.0 if side == "LONG" else 0.0
         feature_row["side_buy"] = side_buy
+        feature_row["regime_code"] = _safe_float(event.get("regime_code"), _safe_float(feature_row.get("regime_code"), 0.0))
         feature_row["supertrend_aligned_side"] = 1.0 if (
             (side_buy >= 0.5 and _safe_float(feature_row.get("supertrend_direction")) > 0)
             or (side_buy < 0.5 and _safe_float(feature_row.get("supertrend_direction")) < 0)
@@ -575,6 +576,7 @@ def snapshot_features(
     if feature_frame.empty:
         return {column: 0.0 for column in FEATURE_COLUMNS}
     result = feature_frame.iloc[-1].to_dict()
+    result["regime_code"] = _safe_float(last.get("regime_code") if isinstance(last, dict) else None, _safe_float(result.get("regime_code"), 0.0))
     result["side_buy"] = _side_buy(last.get("side") if isinstance(last, dict) else None)
     result["supertrend_aligned_side"] = 1.0 if (
         (result["side_buy"] >= 0.5 and _safe_float(result.get("supertrend_direction")) > 0)
@@ -758,6 +760,10 @@ def _train_legacy(trades: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     val_auc = roc_auc_score(y[valid_idx], valid_probs) if len(np.unique(y[valid_idx])) > 1 else 0.5
     val_f1 = f1_score(y[valid_idx], preds, zero_division=0)
     selected = np.asarray(valid_probs) >= suggested_threshold
+    val_sharpe = _annualized_sharpe(
+        dataset.iloc[valid_idx]["r_multiple"].astype(float)[selected].tolist(),
+        dataset.iloc[valid_idx]["holding_bars"].astype(float)[selected].tolist(),
+    )
     val_drawdown = _max_drawdown(dataset.iloc[valid_idx]["r_multiple"].astype(float)[selected].tolist())
     coverage_pct = (float(selected.sum()) / max(1, len(valid_idx))) * 100.0
     state = {
@@ -826,7 +832,8 @@ def predict(features_dict: Dict[str, Any], symbol: Optional[str] = "BTCUSDT") ->
     model = state.get("model")
     if model is None:
         return 0.5
-    row = np.asarray([[ _safe_float(features_dict.get(column), 0.0) for column in FEATURE_COLUMNS ]], dtype=float)
+    feature_order = list(state.get("feature_order") or FEATURE_COLUMNS)
+    row = np.asarray([[_safe_float(features_dict.get(column), 0.0) for column in feature_order]], dtype=float)
     raw = float(_positive_proba(model, row)[0])
     calibrator = state.get("calibrator")
     if calibrator is not None:

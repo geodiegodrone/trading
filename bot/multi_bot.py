@@ -12,10 +12,13 @@ from dotenv import load_dotenv
 
 import activity_log
 import binance_broker
+import circuit_breaker
 import market_stream
 from bot_config import DEFAULT_CONFIG, get_symbol_config, parse_symbols
 from features import build_features
 import ml_model
+import regime as regime_detector
+from strategies import enrich_indicators, signal_breakout, signal_meanrev, signal_trend
 import trade_log
 
 ROOT = Path(__file__).resolve().parent
@@ -27,6 +30,7 @@ logger = logging.getLogger("multi_bot")
 SYMBOLS = ["BTCUSDT"]
 PORTFOLIO_FILE = ROOT / "portfolio_state.json"
 DAILY_FILE = ROOT / "daily_balance.json"
+WEEKLY_FILE = ROOT / "weekly_balance.json"
 OPEN_TRADE_FILE = ROOT / "open_trade_id.json"
 
 lock = threading.Lock()
@@ -62,10 +66,14 @@ def _as_float(value, default=0.0):
 def _get_symbol_config(symbol):
     cfg = dict(DEFAULT_CONFIG)
     cfg.update(get_symbol_config(symbol))
-    cfg["timeframe"] = int(cfg.get("timeframe", 5))
+    cfg["strategy_mode"] = str(cfg.get("strategy_mode", "regime")).lower()
+    cfg["primary_timeframe"] = int(cfg.get("primary_timeframe", cfg.get("timeframe", 60)))
+    cfg["confirmation_timeframe"] = int(cfg.get("confirmation_timeframe", 240))
+    cfg["timeframe"] = int(cfg.get("timeframe", cfg["primary_timeframe"]))
     cfg["leverage"] = int(cfg.get("leverage", 2))
     cfg["ema_fast"] = int(cfg.get("ema_fast", 9))
     cfg["ema_slow"] = int(cfg.get("ema_slow", 21))
+    cfg["ema_confirm"] = int(cfg.get("ema_confirm", 50))
     cfg["ema_trend"] = int(cfg.get("ema_trend", 200))
     cfg["rsi_period"] = int(cfg.get("rsi_period", 14))
     cfg["adx_period"] = int(cfg.get("adx_period", 14))
@@ -83,6 +91,19 @@ def _get_symbol_config(symbol):
     cfg["breakeven_buffer_pct"] = float(cfg.get("breakeven_buffer_pct", 0.0))
     cfg["trail_start_r"] = float(cfg.get("trail_start_r", 1.5))
     cfg["trail_atr_mult"] = float(cfg.get("trail_atr_mult", 1.25))
+    cfg["circuit_breaker_enabled"] = bool(cfg.get("circuit_breaker_enabled", True))
+    cfg["cb_daily_loss_pct"] = float(cfg.get("cb_daily_loss_pct", 3.0))
+    cfg["cb_weekly_loss_pct"] = float(cfg.get("cb_weekly_loss_pct", 7.0))
+    cfg["cb_consecutive_losses"] = int(cfg.get("cb_consecutive_losses", 4))
+    cfg["cb_rolling_window"] = int(cfg.get("cb_rolling_window", 20))
+    cfg["cb_rolling_winrate_min"] = float(cfg.get("cb_rolling_winrate_min", 0.30))
+    cfg["cb_volatility_spike_pct"] = float(cfg.get("cb_volatility_spike_pct", 8.0))
+    cfg["cb_cooldown_hours"] = float(cfg.get("cb_cooldown_hours", 12.0))
+    cfg["meanrev_atr_mult"] = float(cfg.get("meanrev_atr_mult", 0.5))
+    cfg["meanrev_tp_at_sma"] = bool(cfg.get("meanrev_tp_at_sma", True))
+    cfg["breakout_atr_mult"] = float(cfg.get("breakout_atr_mult", 1.0))
+    cfg["breakout_tp_atr_mult"] = float(cfg.get("breakout_tp_atr_mult", 3.0))
+    cfg["volatile_atr_mult"] = float(cfg.get("volatile_atr_mult", 2.0))
     return cfg
 
 
@@ -91,13 +112,27 @@ def _fetch_candles(symbol, timeframe, limit=250):
     if not klines:
         klines = binance_broker.get_kline(symbol, timeframe, limit)
     # Binance kline: [open_time, open, high, low, close, volume, ...]
-    df = pd.DataFrame(klines, columns=["ts", "open", "high", "low", "close", "volume",
-                                        "close_time", "quote_vol", "trades",
-                                        "taker_base", "taker_quote", "ignore"])
-    df = df[["ts", "open", "high", "low", "close", "volume"]]
+    df = pd.DataFrame(
+        klines,
+        columns=[
+            "ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "quote_vol",
+            "trades",
+            "taker_base",
+            "taker_quote",
+            "ignore",
+        ],
+    )
+    df = df[["ts", "open", "high", "low", "close", "volume", "quote_vol", "taker_base", "taker_quote"]]
     if df.empty:
         return df
-    for col in ["ts", "open", "high", "low", "close", "volume"]:
+    for col in ["ts", "open", "high", "low", "close", "volume", "quote_vol", "taker_base", "taker_quote"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.sort_values("ts").reset_index(drop=True)
     return df
@@ -108,6 +143,7 @@ def _compute_indicators(df, cfg):
         return df
     fast = int(cfg["ema_fast"])
     slow = int(cfg["ema_slow"])
+    confirm = int(cfg.get("ema_confirm", 50))
     trend = int(cfg["ema_trend"])
     rsi_period = int(cfg["rsi_period"])
     adx_period = int(cfg["adx_period"])
@@ -115,6 +151,7 @@ def _compute_indicators(df, cfg):
     st_mult = float(cfg["supertrend_mult"])
     df[f"ema{fast}"] = ta.ema(df["close"], length=fast)
     df[f"ema{slow}"] = ta.ema(df["close"], length=slow)
+    df[f"ema{confirm}"] = ta.ema(df["close"], length=confirm)
     df[f"ema{trend}"] = ta.ema(df["close"], length=trend)
     df["rsi"] = ta.rsi(df["close"], length=rsi_period)
     adx = ta.adx(df["high"], df["low"], df["close"], length=adx_period)
@@ -135,44 +172,11 @@ def _compute_indicators(df, cfg):
     }
     df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=cfg["atr_period"])
     df["vol_ma20"] = df["volume"].rolling(20).mean()
-    return df
+    return enrich_indicators(df)
 
 
 def evaluate_signal(last, df, cfg):
-    if last is None or df.empty:
-        return "NEUTRAL"
-    cols = df.attrs.get("indicator_cols", {})
-    ema_fast = _as_float(last.get(cols.get("ema_fast", "ema9")))
-    ema_slow = _as_float(last.get(cols.get("ema_slow", "ema21")))
-    ema_trend = _as_float(last.get(cols.get("ema_trend", "ema200")))
-    close = _as_float(last.get("close"))
-    rsi = _as_float(last.get("rsi"))
-    adx = _as_float(last.get("adx"))
-    volume = _as_float(last.get("volume"))
-    vol_ma20 = _as_float(last.get("vol_ma20"))
-    supertrend_dir = int(_as_float(last.get(cols.get("supertrend_dir", "SUPERTd_14_3.5"))))
-
-    long_ok = (
-        ema_fast > ema_slow
-        and close > ema_trend
-        and supertrend_dir == 1
-        and adx > float(cfg.get("adx_threshold", 25))
-        and volume > (vol_ma20 * float(cfg.get("volume_mult", 1.2)) if vol_ma20 else 0)
-        and float(cfg.get("rsi_min", 30)) < rsi < float(cfg.get("rsi_max", 70))
-    )
-    short_ok = (
-        ema_fast < ema_slow
-        and close < ema_trend
-        and supertrend_dir == -1
-        and adx > float(cfg.get("adx_threshold", 25))
-        and volume > (vol_ma20 * float(cfg.get("volume_mult", 1.2)) if vol_ma20 else 0)
-        and float(cfg.get("rsi_min", 30)) < rsi < float(cfg.get("rsi_max", 70))
-    )
-    if long_ok:
-        return "LONG"
-    if short_ok:
-        return "SHORT"
-    return "NEUTRAL"
+    return signal_trend(last, df, cfg)
 
 
 def _load_daily_balance():
@@ -186,6 +190,21 @@ def _load_daily_balance():
         data["daily_start_balance"] = binance_broker.get_balance()
         data.setdefault("paused", False)
         _save_json(DAILY_FILE, data)
+    return data
+
+
+def _load_weekly_balance():
+    data = _load_json(WEEKLY_FILE, {})
+    now = datetime.now(timezone.utc)
+    year, week, _ = now.isocalendar()
+    week_key = f"{year}-W{week:02d}"
+    if data.get("week") != week_key:
+        bal = binance_broker.get_balance()
+        data = {"week": week_key, "weekly_start_balance": bal}
+        _save_json(WEEKLY_FILE, data)
+    elif _as_float(data.get("weekly_start_balance"), 0.0) <= 0:
+        data["weekly_start_balance"] = binance_broker.get_balance()
+        _save_json(WEEKLY_FILE, data)
     return data
 
 
@@ -610,32 +629,55 @@ def _calc_portfolio_risk(balance, state):
     return state
 
 
-def _kelly_trade_usdt(balance):
+def _kelly_trade_usdt(balance, price, stop_distance, leverage):
+    base_trade = float(os.getenv("TRADE_USDT", "50"))
     try:
         stats = trade_log.get_stats()
         total = int(stats.get("total", 0))
         if total < 20:
-            return float(os.getenv("TRADE_USDT", "50"))
-        wins = int(stats.get("wins", 0))
-        losses = int(stats.get("losses", 0))
-        if total <= 0 or wins <= 0 or losses <= 0:
-            return float(os.getenv("TRADE_USDT", "50"))
-        trades = trade_log.get_all_trades()
-        pnl_values = [float(t.get("pnl", 0.0)) for t in trades]
-        positive = [p for p in pnl_values if p > 0]
-        negative = [p for p in pnl_values if p < 0]
-        if not positive or not negative:
-            return float(os.getenv("TRADE_USDT", "50"))
-        win_rate = wins / total
-        avg_win = sum(positive) / len(positive)
-        avg_loss = abs(sum(negative) / len(negative))
-        if avg_loss <= 0:
-            return float(os.getenv("TRADE_USDT", "50"))
-        kelly = win_rate - (1 - win_rate) / (avg_win / avg_loss)
-        half_kelly = max(kelly / 2.0, 0.02)
-        return float(balance) * min(half_kelly, 0.10)
+            half_kelly = 0.02
+        else:
+            wins = int(stats.get("wins", 0))
+            losses = int(stats.get("losses", 0))
+            if total <= 0 or wins <= 0 or losses <= 0:
+                half_kelly = 0.02
+            else:
+                trades = trade_log.get_all_trades()
+                pnl_values = [float(t.get("pnl", 0.0)) for t in trades if t.get("pnl") is not None]
+                positive = [p for p in pnl_values if p > 0]
+                negative = [p for p in pnl_values if p < 0]
+                if not positive or not negative:
+                    half_kelly = 0.02
+                else:
+                    win_rate = wins / total
+                    avg_win = sum(positive) / len(positive)
+                    avg_loss = abs(sum(negative) / len(negative))
+                    if avg_loss <= 0:
+                        half_kelly = 0.02
+                    else:
+                        kelly = win_rate - (1 - win_rate) / (avg_win / avg_loss)
+                        half_kelly = max(kelly / 2.0, 0.01)
+        half_kelly = min(half_kelly, 0.05)
+        balance = float(balance)
+        risk_target_usdt = balance * 0.005
+        if price > 0 and stop_distance > 0 and leverage > 0:
+            vol_target_trade = risk_target_usdt * price / (leverage * stop_distance)
+        else:
+            vol_target_trade = base_trade
+        kelly_trade = balance * half_kelly
+        trade_usdt = max(15.0, min(vol_target_trade, kelly_trade))
+        status = circuit_breaker.get_status()
+        last_resume = status.get("last_resume_at")
+        if last_resume:
+            try:
+                resumed = datetime.fromisoformat(str(last_resume).replace("Z", "+00:00"))
+                if (datetime.now(timezone.utc) - resumed).total_seconds() <= 48 * 3600:
+                    trade_usdt *= 0.5
+            except Exception:
+                pass
+        return max(10.0, trade_usdt)
     except Exception:
-        return float(os.getenv("TRADE_USDT", "50"))
+        return base_trade
 
 
 def _ml_confidence(features, symbol):
@@ -664,6 +706,7 @@ def _retrain_if_ready(symbol):
         result = bootstrap_ml.bootstrap(
             days=int(os.getenv("ML_BOOTSTRAP_DAYS", "180")),
             symbol=symbol,
+            timeframe=int(_get_symbol_config(symbol).get("primary_timeframe", 60)),
             quiet=True,
         )
         activity_log.push(
@@ -748,11 +791,12 @@ def _close_trade(symbol, position, exit_price, reason="EXIT"):
     except Exception as exc:
         logger.warning("close_position failed for %s: %s", symbol, exc)
     r_multiple = (pnl / risk_usdt) if risk_usdt > 0 else 0.0
+    circuit_breaker.update_on_trade_close(pnl, pnl > 0)
     activity_log.push(symbol, "trade_close", f'CERRÓ {side} ({reason}) | PnL={pnl:+.2f} USDT | R={r_multiple:+.2f}')
     threading.Thread(target=_retrain_if_ready, args=(symbol,), daemon=True).start()
 
 
-def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt):
+def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt, strategy_kind="trend", regime_name="TREND"):
     price = _as_float(last["close"])
     atr = _as_float(last.get("atr"))
     if price <= 0 or atr <= 0:
@@ -762,10 +806,21 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt):
     if qty <= 0:
         logger.warning("Skipping %s entry because normalized quantity is too small", symbol)
         return
-    sl_dist = atr * cfg["atr_mult"]
+    sma20 = _as_float(pd.Series(df["close"]).rolling(20).mean().iloc[-1]) if len(df) >= 20 else 0.0
+    if strategy_kind == "meanrev":
+        sl_dist = atr * float(cfg.get("meanrev_atr_mult", 0.5))
+    elif strategy_kind == "breakout":
+        sl_dist = atr * float(cfg.get("volatile_atr_mult", 2.0) if regime_name == "VOLATILE" else cfg.get("breakout_atr_mult", 1.0))
+    else:
+        sl_dist = atr * cfg["atr_mult"]
     if side == "Buy":
         sl = price - sl_dist
-        tp = price + sl_dist * 2.0
+        if strategy_kind == "meanrev" and bool(cfg.get("meanrev_tp_at_sma", True)) and sma20 > price:
+            tp = sma20
+        elif strategy_kind == "breakout":
+            tp = price + atr * float(cfg.get("breakout_tp_atr_mult", 3.0))
+        else:
+            tp = price + sl_dist * 2.0
         try:
             binance_broker.open_long(symbol, qty)
         except Exception as exc:
@@ -773,7 +828,12 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt):
             return
     else:
         sl = price + sl_dist
-        tp = price - sl_dist * 2.0
+        if strategy_kind == "meanrev" and bool(cfg.get("meanrev_tp_at_sma", True)) and 0 < sma20 < price:
+            tp = sma20
+        elif strategy_kind == "breakout":
+            tp = price - atr * float(cfg.get("breakout_tp_atr_mult", 3.0))
+        else:
+            tp = price - sl_dist * 2.0
         try:
             binance_broker.open_short(symbol, qty)
         except Exception as exc:
@@ -835,6 +895,11 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt):
         "trough_price": price,
         "breakeven_moved": False,
         "trail_stop": sl,
+        "strategy_kind": strategy_kind,
+        "regime_name": regime_name,
+        "primary_timeframe": int(cfg.get("primary_timeframe", cfg.get("timeframe", 60))),
+        "timeout_bars": 24,
+        "opened_ts_ms": int(_as_float(last.get("ts"))),
     }
     _save_portfolio_state(_calc_portfolio_risk(balance, state))
     try:
@@ -859,6 +924,12 @@ def _update_position(symbol, last, signal, cfg):
     move_r = _position_move_r(position, price)
     hit_exit = False
     reason = "EXIT"
+    timeframe_minutes = int(position.get("primary_timeframe", cfg.get("primary_timeframe", 60)))
+    opened_ts_ms = int(_as_float(position.get("opened_ts_ms"), 0.0))
+    current_ts_ms = int(_as_float(last.get("ts"), opened_ts_ms))
+    elapsed_bars = 0
+    if opened_ts_ms > 0 and current_ts_ms >= opened_ts_ms and timeframe_minutes > 0:
+        elapsed_bars = int((current_ts_ms - opened_ts_ms) / (timeframe_minutes * 60 * 1000))
     if side.lower() == "buy":
         position["peak_price"] = max(_as_float(position.get("peak_price"), price), price)
         if risk_usdt > 0 and not position.get("breakeven_moved") and move_r >= float(cfg.get("breakeven_r", 1.0)):
@@ -871,13 +942,16 @@ def _update_position(symbol, last, signal, cfg):
                 position["trail_stop"] = sl
                 activity_log.push(symbol, "risk", f"Stop moved to breakeven @ {sl:,.2f} (R={move_r:.2f})")
         if risk_usdt > 0 and atr > 0 and move_r >= float(cfg.get("trail_start_r", 1.5)):
-            trail_candidate = price - atr * float(cfg.get("trail_atr_mult", 1.25))
+            trail_candidate = _as_float(position.get("peak_price"), price) - atr * 3.0
             if trail_candidate > sl:
                 sl = trail_candidate
                 position["sl"] = sl
                 position["trail_stop"] = sl
-                activity_log.push(symbol, "risk", f"Trailing stop updated @ {sl:,.2f} (R={move_r:.2f})")
-        if price <= sl or price >= tp or signal == "SHORT":
+                activity_log.push(symbol, "risk", f"Chandelier stop updated @ {sl:,.2f} (R={move_r:.2f})")
+        if elapsed_bars >= int(position.get("timeout_bars", 24)) and move_r < 0.3:
+            hit_exit = True
+            reason = "EXIT_TIMEOUT"
+        elif price <= sl or price >= tp or signal == "SHORT":
             hit_exit = True
             reason = "SL" if price <= sl else "TP" if price >= tp else "REV"
     else:
@@ -892,13 +966,16 @@ def _update_position(symbol, last, signal, cfg):
                 position["trail_stop"] = sl
                 activity_log.push(symbol, "risk", f"Stop moved to breakeven @ {sl:,.2f} (R={move_r:.2f})")
         if risk_usdt > 0 and atr > 0 and move_r >= float(cfg.get("trail_start_r", 1.5)):
-            trail_candidate = price + atr * float(cfg.get("trail_atr_mult", 1.25))
+            trail_candidate = _as_float(position.get("trough_price"), price) + atr * 3.0
             if sl <= 0 or trail_candidate < sl:
                 sl = trail_candidate
                 position["sl"] = sl
                 position["trail_stop"] = sl
-                activity_log.push(symbol, "risk", f"Trailing stop updated @ {sl:,.2f} (R={move_r:.2f})")
-        if price >= sl or price <= tp or signal == "LONG":
+                activity_log.push(symbol, "risk", f"Chandelier stop updated @ {sl:,.2f} (R={move_r:.2f})")
+        if elapsed_bars >= int(position.get("timeout_bars", 24)) and move_r < 0.3:
+            hit_exit = True
+            reason = "EXIT_TIMEOUT"
+        elif price >= sl or price <= tp or signal == "LONG":
             hit_exit = True
             reason = "SL" if price >= sl else "TP" if price <= tp else "REV"
     if hit_exit:
@@ -923,6 +1000,63 @@ def _market_paused(balance):
     return _daily_loss_triggered(balance)
 
 
+def _htf_confirms(signal, confirmation_df, cfg):
+    if signal == "NEUTRAL" or confirmation_df.empty:
+        return False
+    row = confirmation_df.iloc[-1]
+    ema50 = _as_float(row.get(f"ema{int(cfg.get('ema_confirm', 50))}"))
+    ema200 = _as_float(row.get(f"ema{int(cfg.get('ema_trend', 200))}"))
+    close = _as_float(row.get("close"))
+    if signal == "LONG":
+        return close > ema200 and ema50 > ema200
+    return close < ema200 and ema50 < ema200
+
+
+def _regime_threshold(regime_name, cfg):
+    mapping = {
+        "TREND": 0.55,
+        "RANGE": 0.60,
+        "VOLATILE": 0.65,
+        "MIXED": 1.0,
+    }
+    return float(mapping.get(str(regime_name or "").upper(), cfg.get("ml_threshold", 0.55)))
+
+
+def _select_signal(symbol, primary_df, confirmation_df, cfg):
+    regime_name = "TREND"
+    mode = str(cfg.get("strategy_mode", "regime")).lower()
+    strategy_name = mode
+    if mode == "regime":
+        regime_info = regime_detector.classify_regime(primary_df)
+        regime_name = str(regime_info.get("regime", "MIXED")).upper()
+        activity_log.push(symbol, "regime", f"Régimen {regime_name} | source={regime_info.get('source')} | hurst={float(regime_info.get('hurst', 0.0)):.2f} | vol={float(regime_info.get('realized_volatility_pct', 0.0)):.2f}%")
+        if regime_name == "TREND":
+            strategy_name = "trend"
+            signal = signal_trend(primary_df.iloc[-1].to_dict(), primary_df, cfg)
+        elif regime_name == "RANGE":
+            strategy_name = "meanrev"
+            signal = signal_meanrev(primary_df.iloc[-1].to_dict(), primary_df, cfg)
+        elif regime_name == "VOLATILE":
+            strategy_name = "breakout"
+            signal = signal_breakout(primary_df.iloc[-1].to_dict(), primary_df, cfg)
+        else:
+            return "NEUTRAL", strategy_name, regime_name
+    elif mode == "meanrev":
+        regime_name = "RANGE"
+        signal = signal_meanrev(primary_df.iloc[-1].to_dict(), primary_df, cfg)
+    elif mode == "breakout":
+        regime_name = "VOLATILE"
+        signal = signal_breakout(primary_df.iloc[-1].to_dict(), primary_df, cfg)
+    else:
+        regime_name = "TREND"
+        strategy_name = "trend"
+        signal = signal_trend(primary_df.iloc[-1].to_dict(), primary_df, cfg)
+    if signal != "NEUTRAL" and not _htf_confirms(signal, confirmation_df, cfg):
+        activity_log.push(symbol, "signal", f"HTF 4h no confirma {signal}")
+        return "NEUTRAL", strategy_name, regime_name
+    return signal, strategy_name, regime_name
+
+
 def run_symbol(symbol, cfg, shared_stop_event):
     if not binance_broker.is_symbol_trading(symbol):
         logger.warning("Skipping %s because Binance reports it as not trading", symbol)
@@ -934,38 +1068,50 @@ def run_symbol(symbol, cfg, shared_stop_event):
     while not shared_stop_event.is_set():
         try:
             balance = _as_float(binance_broker.get_balance())
-            if _market_paused(balance):
-                time.sleep(5)
+            daily_state = _load_daily_balance()
+            weekly_state = _load_weekly_balance()
+            primary_df = _compute_indicators(_fetch_candles(symbol, cfg["primary_timeframe"], limit=450), cfg)
+            confirmation_df = _compute_indicators(_fetch_candles(symbol, cfg["confirmation_timeframe"], limit=320), cfg)
+            if primary_df.empty or confirmation_df.empty or len(primary_df) < 220 or len(confirmation_df) < 220:
+                time.sleep(60)
                 continue
-            df = _fetch_candles(symbol, cfg["timeframe"])
-            df = _compute_indicators(df, cfg)
-            if df.empty or len(df) < 50:
-                time.sleep(5)
-                continue
-            feature_frame = build_features(df)
-            last = df.iloc[-1].to_dict()
+            feature_frame = build_features(primary_df)
+            last = primary_df.iloc[-1].to_dict()
             feature_context = feature_frame.iloc[-1].to_dict()
-            signal = evaluate_signal(last, df, cfg)
-            cols = df.attrs.get("indicator_cols", {})
+            signal, strategy_kind, regime_name = _select_signal(symbol, primary_df, confirmation_df, cfg)
+            cols = primary_df.attrs.get("indicator_cols", {})
             ema_fast = _as_float(last.get(cols.get("ema_fast", "ema9")))
             ema_slow = _as_float(last.get(cols.get("ema_slow", "ema21")))
             ema_trend = _as_float(last.get(cols.get("ema_trend", "ema200")))
             rsi = _as_float(last.get("rsi"))
             adx = _as_float(last.get("adx"))
-            activity_log.push(symbol, "signal", f"Se?al: {signal} | EMA{cfg['ema_fast']}={ema_fast:.1f} EMA{cfg['ema_slow']}={ema_slow:.1f} RSI={rsi:.1f} ADX={adx:.1f}")
-            if adx < float(cfg.get("adx_threshold", 25)):
-                activity_log.push(symbol, "regime", f"Mercado lateral (ADX={adx:.1f}<{float(cfg.get('adx_threshold', 25)):.1f}) - sin operar")
+            activity_log.push(symbol, "signal", f"Señal: {signal} | mode={strategy_kind} | regime={regime_name} | EMA{cfg['ema_fast']}={ema_fast:.1f} EMA{cfg['ema_slow']}={ema_slow:.1f} RSI={rsi:.1f} ADX={adx:.1f}")
+            position = _get_current_position(symbol)
+            if position:
                 _update_position(symbol, last, signal, cfg)
-                time.sleep(5)
+                time.sleep(60)
                 continue
-            features = {
-                **feature_context,
-            }
+            if cfg.get("circuit_breaker_enabled", True):
+                paused, reason = circuit_breaker.is_paused()
+                if not paused:
+                    paused, reason = circuit_breaker.check_circuit_breaker(
+                        balance,
+                        _as_float(daily_state.get("daily_start_balance"), balance),
+                        _as_float(weekly_state.get("weekly_start_balance"), balance),
+                        last,
+                        cfg,
+                    )
+                if paused:
+                    activity_log.push(symbol, "circuit_breaker", f"⛔ Bot pausado: {reason}")
+                    time.sleep(60)
+                    continue
+            features = {**feature_context}
             features["side_buy"] = 1.0 if signal == "LONG" else 0.0
             features["supertrend_aligned_side"] = 1.0 if (
                 (features["side_buy"] >= 0.5 and _as_float(features.get("supertrend_direction")) > 0)
                 or (features["side_buy"] < 0.5 and _as_float(features.get("supertrend_direction")) < 0)
             ) else 0.0
+            features["regime_code"] = {"TREND": 1.0, "RANGE": -1.0, "VOLATILE": 2.0, "MIXED": 0.0}.get(regime_name, 0.0)
             confidence = _ml_confidence(features, symbol)
             ml_threshold = float(cfg.get("ml_threshold", 0.55))
             ml_ready = False
@@ -979,7 +1125,7 @@ def run_symbol(symbol, cfg, shared_stop_event):
             if ML_THRESHOLD_OVERRIDE not in (None, ""):
                 ml_threshold = float(ML_THRESHOLD_OVERRIDE)
             elif ml_ready:
-                ml_threshold = float(ml_info.get("suggested_threshold", cfg["ml_threshold"]))
+                ml_threshold = max(float(ml_info.get("suggested_threshold", cfg["ml_threshold"])), _regime_threshold(regime_name, cfg))
             else:
                 ml_threshold = float(cfg["ml_threshold"])
                 not_ready_reason = str(ml_info.get("not_ready_reason") or "gates de validación no cumplidas")
@@ -988,42 +1134,48 @@ def run_symbol(symbol, cfg, shared_stop_event):
                     _ML_NOT_READY_STATE[symbol] = not_ready_reason
             if ml_ready:
                 _ML_NOT_READY_STATE.pop(symbol, None)
-                activity_log.push(symbol, "ml", f"ML confianza: {confidence:.0%} (umbral {ml_threshold:.2f}) {'se?al aceptada' if confidence >= ml_threshold else 'se?al rechazada'}")
+                activity_log.push(symbol, "ml", f"ML confianza: {confidence:.0%} (umbral {ml_threshold:.2f}) {'señal aceptada' if confidence >= ml_threshold else 'señal rechazada'}")
             else:
                 activity_log.push(symbol, "ml", f"ML warming: proba={confidence:.0%} | gate inactivo | cfg={ml_threshold:.2f}")
-            position = _get_current_position(symbol)
             state = _portfolio_state()
             state = _calc_portfolio_risk(balance, state)
             _save_portfolio_state(state)
-            if position:
-                _update_position(symbol, last, signal, cfg)
-                time.sleep(5)
-                continue
             if signal == "NEUTRAL":
-                time.sleep(5)
+                time.sleep(60)
                 continue
             if confidence < ml_threshold and ml_ready:
-                time.sleep(5)
+                time.sleep(60)
                 continue
-            trade_usdt = _kelly_trade_usdt(balance)
             price = _as_float(last.get("close"))
             atr = _as_float(last.get("atr"))
+            if strategy_kind == "meanrev":
+                atr_stop_distance = atr * float(cfg.get("meanrev_atr_mult", 0.5))
+            elif strategy_kind == "breakout":
+                atr_stop_distance = atr * float(cfg.get("volatile_atr_mult", 2.0) if regime_name == "VOLATILE" else cfg.get("breakout_atr_mult", 1.0))
+            else:
+                atr_stop_distance = atr * float(cfg.get("atr_mult", 1.5))
+            trade_usdt = _kelly_trade_usdt(balance, price, atr_stop_distance, cfg["leverage"])
             qty_preview = binance_broker.normalize_quantity(symbol, (trade_usdt * cfg["leverage"]) / price) if price > 0 else 0.0
-            risk_pct = (qty_preview * price * (atr * cfg["atr_mult"])) / balance * 100 if balance > 0 else 0.0
+            risk_pct = (qty_preview * atr_stop_distance) / balance * 100 if balance > 0 else 0.0
             projected = state.get("total_risk_pct", 0.0) + risk_pct
             if projected > float(cfg.get("daily_risk_cap", 5.0)):
-                activity_log.push("PORTFOLIO", "risk", "Límite de riesgo del portafolio (5%) alcanzado — nueva posición bloqueada")
-                time.sleep(5)
+                activity_log.push("PORTFOLIO", "risk", "Límite de riesgo del portafolio alcanzado — nueva posición bloqueada")
+                time.sleep(60)
                 continue
-            _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt)
+            _open_trade(symbol, signal, last, primary_df, cfg, balance, trade_usdt, strategy_kind=strategy_kind, regime_name=regime_name)
         except Exception as exc:
             logger.exception("Symbol loop error for %s", symbol)
             activity_log.push(symbol, "error", f"Error: {exc}")
-        time.sleep(5)
+        time.sleep(60)
 
 
 def main():
-    market_stream.start([(symbol, _get_symbol_config(symbol)["timeframe"]) for symbol in SYMBOLS])
+    stream_pairs = []
+    for symbol in SYMBOLS:
+        cfg = _get_symbol_config(symbol)
+        stream_pairs.append((symbol, cfg["primary_timeframe"]))
+        stream_pairs.append((symbol, cfg["confirmation_timeframe"]))
+    market_stream.start(stream_pairs)
     reconcile_state()
     threads = []
     for symbol in SYMBOLS:

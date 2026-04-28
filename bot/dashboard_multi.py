@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse
 
 import activity_log
 import binance_broker
+import circuit_breaker
 import market_stream
 from bot_config import get_symbol_config, parse_symbols
 from features import build_features
@@ -151,13 +152,14 @@ def _fetch_candles(symbol, timeframe=5, limit=250):
     klines = market_stream.get_candles(symbol, timeframe, limit)
     if not klines:
         klines = binance_broker.get_kline(symbol, timeframe, limit)
-    df = pd.DataFrame(klines, columns=["ts", "open", "high", "low", "close", "volume",
-                                        "close_time", "quote_vol", "trades",
-                                        "taker_base", "taker_quote", "ignore"])
-    df = df[["ts", "open", "high", "low", "close", "volume"]]
+    df = pd.DataFrame(
+        klines,
+        columns=["ts", "open", "high", "low", "close", "volume", "close_time", "quote_vol", "trades", "taker_base", "taker_quote", "ignore"],
+    )
+    df = df[["ts", "open", "high", "low", "close", "volume", "quote_vol", "taker_base", "taker_quote"]]
     if df.empty:
         return df
-    for col in ["ts", "open", "high", "low", "close", "volume"]:
+    for col in ["ts", "open", "high", "low", "close", "volume", "quote_vol", "taker_base", "taker_quote"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.sort_values("ts").reset_index(drop=True)
     return df
@@ -573,11 +575,12 @@ def _run_recovery(force_refresh: bool = True, auto: bool = False):
 
 def _build_symbol_payload(symbol):
     cfg = get_symbol_config(symbol)
-    cfg_timeframe = int(cfg.get("timeframe", os.getenv("TIMEFRAME", "5")))
+    cfg_timeframe = int(cfg.get("primary_timeframe", cfg.get("timeframe", os.getenv("TIMEFRAME", "60"))))
     df = _fetch_candles(symbol, cfg_timeframe)
     df = _compute_indicators(df, cfg)
     events = _recent_activity(symbol, 20)
     updated_at = datetime.now(timezone.utc)
+    cb_status = circuit_breaker.get_status()
     if df.empty or len(df) < 50:
         return {
             "price": 0.0,
@@ -590,6 +593,7 @@ def _build_symbol_payload(symbol):
             "kpis": {},
             "indicators": {},
             "trade_gate": {"status": "SIN DATOS", "reason": "Esperando velas suficientes", "ready": False},
+            "circuit_breaker": cb_status,
             "events": events,
             "updated_at": updated_at.isoformat(),
             "updated_label": updated_at.strftime("%H:%M:%S UTC"),
@@ -691,6 +695,7 @@ def _build_symbol_payload(symbol):
         "kpis": kpis,
         "indicators": indicators,
         "trade_gate": trade_gate,
+        "circuit_breaker": cb_status,
         "events": events,
         "position_source": position_snapshot.get("source"),
         "position_error": position_snapshot.get("error"),
@@ -786,6 +791,7 @@ def _portfolio_payload():
     daily = _daily_state()
     start_balance = _as_float(daily.get("daily_start_balance"), balance)
     daily_loss_pct = _daily_loss_pct(balance)
+    cb_status = circuit_breaker.get_status()
     return {
         "total_balance": balance,
         "total_pnl_realized": realized,
@@ -802,6 +808,7 @@ def _portfolio_payload():
         "worst_trade": _as_float(stats.get("worst")),
         "trade_stats": stats,
         "ml_confidence": 0.5,
+        "circuit_breaker": cb_status,
     }
 
 
@@ -1044,10 +1051,11 @@ async def _healthcheck_loop():
 @app.on_event("startup")
 async def startup():
     stream_specs = {
-        (symbol, int(get_symbol_config(symbol).get("timeframe", os.getenv("TIMEFRAME", "5"))))
+        (symbol, int(get_symbol_config(symbol).get("primary_timeframe", get_symbol_config(symbol).get("timeframe", os.getenv("TIMEFRAME", "60")))))
         for symbol in SYMBOLS
     }
     for symbol in SYMBOLS:
+        stream_specs.add((symbol, int(get_symbol_config(symbol).get("confirmation_timeframe", 240))))
         for minutes in CHART_TIMEFRAMES.values():
             stream_specs.add((symbol, minutes))
     market_stream.start(sorted(stream_specs))
@@ -1088,6 +1096,18 @@ async def api_healthcheck_latest():
         report = await asyncio.to_thread(_run_healthcheck)
         _store_health_report(report)
     return report
+
+
+@app.get("/api/circuit-breaker")
+async def api_circuit_breaker():
+    return circuit_breaker.get_status()
+
+
+@app.post("/api/circuit-breaker/resume")
+async def api_circuit_breaker_resume():
+    circuit_breaker.set_manual_override(True)
+    ok = circuit_breaker.force_resume()
+    return {"ok": ok, "status": circuit_breaker.get_status()}
 
 
 @app.websocket("/ws/portfolio")

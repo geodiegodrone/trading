@@ -175,6 +175,23 @@
       flex-wrap: wrap;
     }
 
+    .cb-banner {
+      display: none;
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(251, 191, 36, 0.35);
+      background: rgba(251, 191, 36, 0.12);
+      color: #fef3c7;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+
+    .cb-banner.active {
+      display: block;
+    }
+
     .tab-btn {
       appearance: none;
       border: 1px solid var(--line);
@@ -1960,6 +1977,7 @@
           </div>
         </div>
       </div>
+      <div id="circuitBanner" class="cb-banner"></div>
     </header>
 
     <nav class="tabs" id="tabs"></nav>
@@ -2145,6 +2163,11 @@
                 <div class="kpi-label">${labelWithInfo('Listo para operar', 'Indica si el bot puede abrir una posición ahora mismo y por qué está bloqueado si no puede.')}</div>
                 <div class="kpi-value" id="${id(symbol,'kpiTradeGate')}">--</div>
                 <div class="kpi-sub" id="${id(symbol,'kpiTradeGateHint')}">--</div>
+              </div>
+              <div class="kpi-card">
+                <div class="kpi-label">${labelWithInfo('Estado Circuit Breaker', 'Protección automática del bot frente a pérdidas, drawdown, rachas negativas o volatilidad extrema.')}</div>
+                <div class="kpi-value" id="${id(symbol,'kpiCircuit')}">--</div>
+                <div class="kpi-sub" id="${id(symbol,'kpiCircuitHint')}">--</div>
               </div>
               <div class="kpi-card">
                 <div class="kpi-label">${labelWithInfo('Estadísticas', 'Resumen del historial cerrado de este símbolo.')}</div>
@@ -2951,6 +2974,33 @@
         'var(--muted)';
     }
 
+    function setCircuitBreaker(symbol, status) {
+      const el = document.getElementById(id(symbol, 'kpiCircuit'));
+      const hint = document.getElementById(id(symbol, 'kpiCircuitHint'));
+      if (!el || !hint) return;
+      const paused = Boolean(status?.paused);
+      const reason = String(status?.reason || (paused ? 'Pausado' : 'Protección inactiva'));
+      const resumeAfter = status?.resume_after ? ` | Auto resume: ${status.resume_after}` : '';
+      el.textContent = paused ? 'PAUSADO' : 'ACTIVO';
+      hint.textContent = paused ? `${reason}${resumeAfter}` : 'Protección habilitada y monitorizando';
+      el.style.color = paused ? 'var(--red)' : 'var(--green)';
+    }
+
+    function renderCircuitBanner(status) {
+      const banner = document.getElementById('circuitBanner');
+      if (!banner) return;
+      const paused = Boolean(status?.paused);
+      if (!paused) {
+        banner.classList.remove('active');
+        banner.textContent = '';
+        return;
+      }
+      const reason = String(status?.reason || 'Protección activa');
+      const resumeAfter = status?.resume_after ? ` · Auto resume: ${status.resume_after}` : '';
+      banner.classList.add('active');
+      banner.textContent = `CIRCUIT BREAKER ACTIVO · ${reason}${resumeAfter}`;
+    }
+
     function renderHealthReport(report) {
       const summary = document.getElementById('healthSummary');
       const details = document.getElementById('healthDetails');
@@ -3255,6 +3305,7 @@
       setKpis(symbol, d.kpis || {});
       setIndicators(symbol, d.indicators || {});
       setTradeGate(symbol, d.trade_gate || {});
+      setCircuitBreaker(symbol, d.circuit_breaker || {});
       pushLog(symbol, d);
       updateTabDot(symbol, d);
     }
@@ -3281,8 +3332,10 @@
       riskBar.style.background = riskPct > 4 ? 'linear-gradient(90deg, #f87171, #ef4444)' : 'linear-gradient(90deg, #36d399, #10b981)';
       document.getElementById('portfolioRiskHint').textContent = riskPct > 4 ? 'Approaching 5% cap' : '0-5% cap';
       const breaker = document.getElementById('portfolioBreaker');
-      breaker.textContent = dailyLossPct >= 100 ? 'PAUSADO' : 'ACTIVO';
-      breaker.style.color = dailyLossPct >= 100 ? 'var(--red)' : dailyLossPct >= 66 ? 'var(--yellow)' : 'var(--green)';
+      const cbStatus = snapshot?.circuit_breaker || {};
+      breaker.textContent = cbStatus?.paused ? 'PAUSADO' : 'ACTIVO';
+      breaker.style.color = cbStatus?.paused ? 'var(--red)' : dailyLossPct >= 66 ? 'var(--yellow)' : 'var(--green)';
+      renderCircuitBanner(cbStatus);
 
       const body = document.getElementById('positionsBody');
       const positions = snapshot?.positions || {};

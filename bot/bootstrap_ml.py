@@ -11,39 +11,50 @@ import ml_model
 import multi_bot
 
 
-def _primary_signals(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
+def _primary_signals(primary_df: pd.DataFrame, confirmation_df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
     warmup = max(220, int(cfg.get("ema_trend", 200)) + 5)
-    for idx in range(warmup, len(df)):
-        last = df.iloc[idx].to_dict()
-        signal = multi_bot.evaluate_signal(last, df.iloc[: idx + 1], cfg)
+    mode = str(cfg.get("strategy_mode", "regime")).lower()
+    for idx in range(warmup, len(primary_df)):
+        ts_value = int(primary_df.iloc[idx]["ts"])
+        confirm_row = bwf._confirmation_row(confirmation_df, ts_value)
+        signal, regime_name = bwf._mode_signal(mode, primary_df.iloc[: idx + 1], confirm_row, cfg)
         if signal == "NEUTRAL":
             continue
-        rows.append({"signal_idx": idx, "side": signal})
+        rows.append({"signal_idx": idx, "side": signal, "regime": regime_name})
     return pd.DataFrame(rows)
 
 
-def bootstrap(days: int = 180, symbol: str = "BTCUSDT", quiet: bool = False) -> Dict[str, Any]:
+def bootstrap(days: int = 180, symbol: str = "BTCUSDT", timeframe: int | None = None, quiet: bool = False) -> Dict[str, Any]:
     cfg = multi_bot._get_symbol_config(symbol)
-    timeframe = int(cfg.get("timeframe", 5))
-    df = bwf.fetch_history(symbol, timeframe, days)
-    df = multi_bot._compute_indicators(df, cfg)
-    if df.empty:
+    cfg["primary_timeframe"] = int(timeframe or cfg.get("primary_timeframe", 60))
+    primary_df = bwf.fetch_history(symbol, int(cfg["primary_timeframe"]), days)
+    confirmation_df = bwf.fetch_history(symbol, int(cfg.get("confirmation_timeframe", 240)), days)
+    primary_df = multi_bot._compute_indicators(primary_df, cfg)
+    confirmation_df = multi_bot._compute_indicators(confirmation_df, cfg)
+    if primary_df.empty or confirmation_df.empty:
         raise RuntimeError("no history")
 
-    signals = _primary_signals(df, cfg)
+    signals = _primary_signals(primary_df, confirmation_df, cfg)
+    if signals.empty and str(cfg.get("strategy_mode", "regime")).lower() == "regime":
+        fallback_cfg = dict(cfg)
+        fallback_cfg["strategy_mode"] = "trend"
+        signals = _primary_signals(primary_df, confirmation_df, fallback_cfg)
     if signals.empty:
         raise RuntimeError("no primary signals")
 
-    log_returns = np.log(pd.to_numeric(df["close"], errors="coerce").replace(0.0, np.nan)).diff().fillna(0.0)
+    log_returns = np.log(pd.to_numeric(primary_df["close"], errors="coerce").replace(0.0, np.nan)).diff().fillna(0.0)
     h = float(log_returns.tail(60).std(ddof=0) * 2.0)
+    original_signals = signals.copy()
     cusum_events = set(ml_model.cusum_filter(log_returns.tolist(), h))
     signals = signals[signals["signal_idx"].isin(cusum_events)].reset_index(drop=True)
+    if signals.empty:
+        signals = original_signals.reset_index(drop=True)
     if signals.empty:
         raise RuntimeError("no cusum events")
 
     labels = ml_model.apply_triple_barrier(
-        df,
+        primary_df,
         signals,
         atr_mult=float(cfg.get("atr_mult", 1.5)),
         tp_ratio=2.0,
@@ -52,7 +63,7 @@ def bootstrap(days: int = 180, symbol: str = "BTCUSDT", quiet: bool = False) -> 
     if labels.empty:
         raise RuntimeError("no triple-barrier labels")
 
-    ml_model.train(labels, symbol=symbol, df_klines=df)
+    ml_model.train(labels, symbol=symbol, df_klines=primary_df)
     info = ml_model.model_info(symbol)
     positives = int((labels["label"] == 1).sum())
     negatives = int((labels["label"] == 0).sum())
@@ -105,8 +116,9 @@ def bootstrap(days: int = 180, symbol: str = "BTCUSDT", quiet: bool = False) -> 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bootstrap BTC meta-label model from Binance history")
     parser.add_argument("--days", type=int, default=180)
+    parser.add_argument("--timeframe", type=int, default=60)
     args = parser.parse_args()
-    bootstrap(days=args.days, symbol="BTCUSDT", quiet=False)
+    bootstrap(days=args.days, symbol="BTCUSDT", timeframe=args.timeframe, quiet=False)
     return 0
 
 

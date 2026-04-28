@@ -24,6 +24,7 @@ FEATURE_COLUMNS = [
     "atr_pct",
     "atr_pct_zscore_50",
     "bb_width_20",
+    "bb_width_zscore_50",
     "bb_pos_20",
     "true_range_pct",
     "range_5_pct",
@@ -39,6 +40,12 @@ FEATURE_COLUMNS = [
     "volume_zscore_50",
     "obv_slope_10",
     "volume_trend_3_ratio",
+    "cvd_20_zscore",
+    "taker_buy_ratio",
+    "price_vs_poc_pct",
+    "is_in_value_area",
+    "order_flow_imbalance",
+    "liquidity_sweep_flag",
     "candle_body_pct",
     "body_avg_3_pct",
     "upper_shadow_pct",
@@ -55,6 +62,7 @@ FEATURE_COLUMNS = [
     "hour_cos",
     "dayofweek_sin",
     "dayofweek_cos",
+    "regime_code",
     "side_buy",
 ]
 
@@ -112,6 +120,55 @@ def _rolling_hurst(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window).apply(_hurst_exponent, raw=True)
 
 
+def _volume_profile_features(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+    window: int = 100,
+    bins: int = 24,
+) -> tuple[pd.Series, pd.Series]:
+    poc = np.full(len(close), np.nan, dtype=float)
+    value_area = np.zeros(len(close), dtype=float)
+    price = ((high + low + close) / 3.0).to_numpy(dtype=float)
+    high_arr = high.to_numpy(dtype=float)
+    low_arr = low.to_numpy(dtype=float)
+    close_arr = close.to_numpy(dtype=float)
+    vol_arr = volume.to_numpy(dtype=float)
+    for idx in range(window - 1, len(close)):
+        start = idx - window + 1
+        lo = np.nanmin(low_arr[start: idx + 1])
+        hi = np.nanmax(high_arr[start: idx + 1])
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            continue
+        edges = np.linspace(lo, hi, bins + 1)
+        centers = (edges[:-1] + edges[1:]) / 2.0
+        hist = np.zeros(bins, dtype=float)
+        for j in range(start, idx + 1):
+            if not np.isfinite(price[j]) or not np.isfinite(vol_arr[j]):
+                continue
+            bucket = int(np.clip(np.searchsorted(edges, price[j], side="right") - 1, 0, bins - 1))
+            hist[bucket] += max(0.0, vol_arr[j])
+        if hist.sum() <= 0:
+            continue
+        poc_idx = int(np.argmax(hist))
+        poc[idx] = float(centers[poc_idx])
+        target = hist.sum() * 0.70
+        order = np.argsort(hist)[::-1]
+        chosen = []
+        acc = 0.0
+        for bucket in order:
+            chosen.append(bucket)
+            acc += hist[bucket]
+            if acc >= target:
+                break
+        if chosen:
+            val = edges[min(chosen)]
+            vah = edges[max(chosen) + 1]
+            value_area[idx] = 1.0 if val <= close_arr[idx] <= vah else 0.0
+    return pd.Series(poc, index=close.index), pd.Series(value_area, index=close.index)
+
+
 def _coerce_side(value: Any) -> float:
     text = str(value or "").strip().upper()
     if text in {"LONG", "BUY", "1", "TRUE"}:
@@ -129,7 +186,7 @@ def build_features(df: pd.DataFrame, history_lookback: int = 50) -> pd.DataFrame
     if frame.empty:
         return pd.DataFrame(columns=FEATURE_COLUMNS)
 
-    for col in ("ts", "open", "high", "low", "close", "volume"):
+    for col in ("ts", "open", "high", "low", "close", "volume", "quote_vol", "taker_base", "taker_quote"):
         if col in frame:
             frame[col] = _safe_float_series(frame[col])
 
@@ -169,6 +226,8 @@ def build_features(df: pd.DataFrame, history_lookback: int = 50) -> pd.DataFrame
     bb_mid = bb["BBM_20_2.0"] if bb is not None and "BBM_20_2.0" in bb else pd.Series(index=frame.index, dtype=float)
     bb_high = bb["BBU_20_2.0"] if bb is not None and "BBU_20_2.0" in bb else pd.Series(index=frame.index, dtype=float)
     supertrend_direction = st["SUPERTd_14_3.5"] if st is not None and "SUPERTd_14_3.5" in st else pd.Series(index=frame.index, dtype=float)
+    quote_vol = frame["quote_vol"] if "quote_vol" in frame.columns else pd.Series(index=frame.index, dtype=float)
+    taker_quote = frame["taker_quote"] if "taker_quote" in frame.columns else pd.Series(index=frame.index, dtype=float)
 
     prev_close = close.shift(1)
     true_range = pd.concat(
@@ -191,6 +250,9 @@ def build_features(df: pd.DataFrame, history_lookback: int = 50) -> pd.DataFrame
     lowest_20 = low.rolling(20).min()
     volume_ma20 = volume.rolling(20).mean()
     obv_slope = _rolling_linear_slope(obv, 10)
+    cvd_step = np.where(close >= open_, volume, -volume)
+    cvd_roll = pd.Series(cvd_step, index=frame.index).rolling(20).sum()
+    poc_100, value_area_100 = _volume_profile_features(high, low, close, volume, window=100, bins=24)
 
     ts = pd.to_datetime(frame["ts"], unit="ms", utc=True, errors="coerce")
     hours = ts.dt.hour.fillna(0).astype(float)
@@ -212,6 +274,7 @@ def build_features(df: pd.DataFrame, history_lookback: int = 50) -> pd.DataFrame
     features["atr_pct"] = (atr / close.replace(0.0, np.nan)) * 100.0
     features["atr_pct_zscore_50"] = _rolling_zscore(features["atr_pct"], history_lookback)
     features["bb_width_20"] = ((bb_high - bb_low) / bb_mid.replace(0.0, np.nan)) * 100.0
+    features["bb_width_zscore_50"] = _rolling_zscore(features["bb_width_20"], history_lookback)
     features["bb_pos_20"] = (close - bb_low) / (bb_high - bb_low).replace(0.0, np.nan)
     features["true_range_pct"] = (true_range / close.replace(0.0, np.nan)) * 100.0
     features["range_5_pct"] = ((highest_5 - lowest_5) / close.replace(0.0, np.nan)) * 100.0
@@ -227,6 +290,17 @@ def build_features(df: pd.DataFrame, history_lookback: int = 50) -> pd.DataFrame
     features["volume_zscore_50"] = _rolling_zscore(volume, history_lookback)
     features["obv_slope_10"] = obv_slope
     features["volume_trend_3_ratio"] = volume.rolling(3).mean() / volume.rolling(20).mean().replace(0.0, np.nan)
+    features["cvd_20_zscore"] = _rolling_zscore(cvd_roll, 100)
+    features["taker_buy_ratio"] = taker_quote / quote_vol.replace(0.0, np.nan)
+    features["price_vs_poc_pct"] = ((close - poc_100) / poc_100.replace(0.0, np.nan)) * 100.0
+    features["is_in_value_area"] = value_area_100
+    features["order_flow_imbalance"] = (close - low) / candle_range
+    features["liquidity_sweep_flag"] = np.where(
+        ((high > highest_20.shift(1)) & (close < highest_20.shift(1)))
+        | ((low < lowest_20.shift(1)) & (close > lowest_20.shift(1))),
+        1.0,
+        0.0,
+    )
     features["candle_body_pct"] = (body / open_.replace(0.0, np.nan)) * 100.0
     features["body_avg_3_pct"] = features["candle_body_pct"].rolling(3).mean()
     features["upper_shadow_pct"] = (upper_shadow / open_.replace(0.0, np.nan)) * 100.0
@@ -243,6 +317,7 @@ def build_features(df: pd.DataFrame, history_lookback: int = 50) -> pd.DataFrame
     features["hour_cos"] = np.cos(2.0 * np.pi * hours / 24.0)
     features["dayofweek_sin"] = np.sin(2.0 * np.pi * weekdays / 7.0)
     features["dayofweek_cos"] = np.cos(2.0 * np.pi * weekdays / 7.0)
+    features["regime_code"] = 0.0
     features["side_buy"] = 0.0
 
     if "side" in frame.columns:

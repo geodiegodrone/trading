@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
+import numpy as np
 import pandas as pd
-import pandas_ta as ta
 
 import bot_config
 import multi_bot
+import regime as regime_detector
+from strategies import signal_breakout, signal_meanrev, signal_trend
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -22,6 +25,17 @@ OUTPUT_PATH = BASE_DIR / "backtest_walkforward_report.json"
 
 def _utc_now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def _interval_label(timeframe: int) -> str:
+    minutes = int(timeframe)
+    if minutes < 60:
+        return f"{minutes}m"
+    if minutes % 1440 == 0:
+        return f"{minutes // 1440}d"
+    if minutes % 60 == 0:
+        return f"{minutes // 60}h"
+    return f"{minutes}m"
 
 
 def _fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int | None = None, limit: int = 1500) -> List[list]:
@@ -39,7 +53,7 @@ def _fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int | None 
 
 
 def fetch_history(symbol: str, timeframe: int, days: int) -> pd.DataFrame:
-    interval = f"{int(timeframe)}m"
+    interval = _interval_label(int(timeframe))
     end_ms = _utc_now_ms()
     start_ms = end_ms - int(days * 24 * 60 * 60 * 1000)
     rows: List[list] = []
@@ -57,403 +71,356 @@ def fetch_history(symbol: str, timeframe: int, days: int) -> pd.DataFrame:
         if len(batch) < 1500:
             break
     if not rows:
-        return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
-    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume", "close_time", "quote_vol", "trades", "taker_base", "taker_quote", "ignore"])
-    df = df[["ts", "open", "high", "low", "close", "volume"]]
-    for col in ["ts", "open", "high", "low", "close", "volume"]:
+        return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume", "quote_vol", "taker_base", "taker_quote"])
+    df = pd.DataFrame(
+        rows,
+        columns=["ts", "open", "high", "low", "close", "volume", "close_time", "quote_vol", "trades", "taker_base", "taker_quote", "ignore"],
+    )
+    df = df[["ts", "open", "high", "low", "close", "volume", "quote_vol", "taker_base", "taker_quote"]]
+    for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.sort_values("ts").reset_index(drop=True)
 
 
-def _compute_indicators(df: pd.DataFrame, cfg: Dict[str, float | int]) -> pd.DataFrame:
-    df = df.copy()
-    fast = int(cfg.get("ema_fast", 9))
-    slow = int(cfg.get("ema_slow", 21))
-    trend = int(cfg.get("ema_trend", 200))
-    rsi_period = int(cfg.get("rsi_period", 14))
-    adx_period = int(cfg.get("adx_period", 14))
-    st_period = int(cfg.get("supertrend_period", 14))
-    st_mult = float(cfg.get("supertrend_mult", 3.5))
-    df[f"ema{fast}"] = ta.ema(df["close"], length=fast)
-    df[f"ema{slow}"] = ta.ema(df["close"], length=slow)
-    df[f"ema{trend}"] = ta.ema(df["close"], length=trend)
-    df["rsi"] = ta.rsi(df["close"], length=rsi_period)
-    adx = ta.adx(df["high"], df["low"], df["close"], length=adx_period)
-    adx_col = f"ADX_{adx_period}"
-    if adx is not None and adx_col in adx:
-        df["adx"] = adx[adx_col]
-    st = ta.supertrend(df["high"], df["low"], df["close"], length=st_period, multiplier=st_mult)
-    st_dir_col = f"SUPERTd_{st_period}_{st_mult}"
-    if st is not None and st_dir_col in st:
-        df["supertrend_direction"] = st[st_dir_col]
-    df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=int(cfg.get("atr_period", 14)))
-    df["vol_ma20"] = df["volume"].rolling(20).mean()
-    df.attrs["indicator_cols"] = {
-        "ema_fast": f"ema{fast}",
-        "ema_slow": f"ema{slow}",
-        "ema_trend": f"ema{trend}",
-        "supertrend_dir": "supertrend_direction",
-    }
-    return df
-
-
 @dataclass
-class Trade:
+class SimTrade:
     side: str
     entry_ts: int
     entry_price: float
-    signal_idx: int | None = None
+    qty: float
+    sl: float
+    tp: float
+    risk_usdt: float
+    strategy: str
+    regime: str
+    peak_price: float
+    trough_price: float
+    entry_idx: int
     exit_ts: int | None = None
     exit_price: float | None = None
     pnl: float = 0.0
     reason: str = ""
 
 
-def _trade_pnl(side: str, entry: float, exit_: float, qty: float) -> float:
-    if side == "LONG":
-        return (exit_ - entry) * qty
-    return (entry - exit_) * qty
+def _safe_float(value, default=0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
-def _trade_move_r(side: str, entry: float, price: float, qty: float, risk_usdt: float) -> float:
-    if entry <= 0 or qty <= 0 or risk_usdt <= 0:
+def _annualized_sharpe(r_values: List[float], holding_bars: List[int], timeframe_minutes: int) -> float:
+    if len(r_values) < 2:
         return 0.0
-    pnl = (price - entry) * qty if side == "LONG" else (entry - price) * qty
-    return pnl / risk_usdt
+    arr = np.asarray(r_values, dtype=float)
+    std = float(arr.std(ddof=1))
+    if std <= 0:
+        return 0.0
+    avg_hold = max(1.0, float(np.mean([max(1, h) for h in holding_bars or [1]])))
+    bars_per_year = (365.0 * 24.0 * 60.0) / float(timeframe_minutes)
+    trades_per_year = bars_per_year / avg_hold
+    return float((arr.mean() / std) * math.sqrt(trades_per_year))
 
 
-def simulate(df: pd.DataFrame, cfg: Dict[str, float | int], trade_usdt: float) -> Dict[str, float | int | list]:
-    if df.empty:
-        return {"trades": [], "total": 0, "pnl": 0.0, "wins": 0, "losses": 0, "win_rate": 0.0, "profit_factor": 0.0, "max_drawdown": 0.0}
+def _max_drawdown_pct(equity_curve: List[float]) -> float:
+    if not equity_curve:
+        return 0.0
+    peak = equity_curve[0]
+    max_dd = 0.0
+    for value in equity_curve:
+        peak = max(peak, value)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - value) / peak * 100.0)
+    return max_dd
 
-    df = _compute_indicators(df, cfg)
-    cols = df.attrs.get("indicator_cols", {})
-    fast_col = cols.get("ema_fast", "ema9")
-    slow_col = cols.get("ema_slow", "ema21")
-    trend_col = cols.get("ema_trend", "ema200")
-    st_col = cols.get("supertrend_dir", "supertrend_direction")
 
-    warmup = max(220, int(cfg.get("ema_trend", 200)) + 5)
-    start_idx = min(warmup, len(df) - 2)
-    if start_idx < 0:
-        start_idx = 0
+def _trade_usdt(balance: float, price: float, stop_distance: float, leverage: float) -> float:
+    if price <= 0 or stop_distance <= 0 or leverage <= 0:
+        return 50.0
+    risk_target = balance * 0.005
+    return max(15.0, risk_target * price / (leverage * stop_distance))
 
-    open_trade: Trade | None = None
-    open_qty = 0.0
-    open_sl = 0.0
-    open_tp = 0.0
-    open_risk_usdt = 0.0
-    open_peak = 0.0
-    open_trough = 0.0
-    open_breakeven_moved = False
-    equity = 0.0
-    peak_equity = 0.0
-    max_drawdown = 0.0
-    trades: List[Trade] = []
 
-    for i in range(start_idx, len(df) - 1):
-        row = df.iloc[i]
-        signal = multi_bot.evaluate_signal(row.to_dict(), df.iloc[: i + 1], cfg)
-        next_row = df.iloc[i + 1]
-        close = float(row["close"])
-        low = float(row["low"])
-        high = float(row["high"])
-        atr = float(row.get("atr") or 0.0)
+def _confirmation_row(confirmation_df: pd.DataFrame, ts_value: int) -> pd.Series | None:
+    subset = confirmation_df[confirmation_df["ts"] <= ts_value]
+    if subset.empty:
+        return None
+    return subset.iloc[-1]
 
-        if open_trade is not None:
-            move_r = _trade_move_r(open_trade.side, open_trade.entry_price, close, open_qty, open_risk_usdt)
-            if open_trade.side == "LONG":
-                open_peak = max(open_peak, close)
-                if not open_breakeven_moved and move_r >= float(cfg.get("breakeven_r", 1.0)):
-                    buffer_pct = float(cfg.get("breakeven_buffer_pct", 0.0))
-                    new_sl = open_trade.entry_price * (1 + buffer_pct / 100.0)
-                    if new_sl > open_sl:
-                        open_sl = new_sl
-                        open_breakeven_moved = True
-                if move_r >= float(cfg.get("trail_start_r", 1.5)) and atr > 0:
-                    trail_candidate = close - atr * float(cfg.get("trail_atr_mult", 1.25))
-                    if trail_candidate > open_sl:
-                        open_sl = trail_candidate
+
+def _htf_confirms(signal: str, confirm_row: pd.Series | None, cfg: Dict[str, float | int]) -> bool:
+    if signal == "NEUTRAL" or confirm_row is None:
+        return False
+    ema50 = _safe_float(confirm_row.get(f"ema{int(cfg.get('ema_confirm', 50))}"))
+    ema200 = _safe_float(confirm_row.get(f"ema{int(cfg.get('ema_trend', 200))}"))
+    close = _safe_float(confirm_row.get("close"))
+    if signal == "LONG":
+        return close > ema200 and ema50 > ema200
+    return close < ema200 and ema50 < ema200
+
+
+def _mode_signal(mode: str, primary_slice: pd.DataFrame, confirm_row: pd.Series | None, cfg: Dict[str, float | int]) -> tuple[str, str]:
+    last = primary_slice.iloc[-1].to_dict()
+    regime_name = "TREND"
+    if mode == "trend":
+        signal = signal_trend(last, primary_slice, cfg)
+    elif mode == "meanrev":
+        regime_name = "RANGE"
+        signal = signal_meanrev(last, primary_slice, cfg)
+    elif mode == "breakout":
+        regime_name = "VOLATILE"
+        signal = signal_breakout(last, primary_slice, cfg)
+    else:
+        regime_info = regime_detector.classify_regime(primary_slice)
+        regime_name = str(regime_info.get("regime", "MIXED")).upper()
+        if regime_name == "TREND":
+            signal = signal_trend(last, primary_slice, cfg)
+        elif regime_name == "RANGE":
+            signal = signal_meanrev(last, primary_slice, cfg)
+        elif regime_name == "VOLATILE":
+            signal = signal_breakout(last, primary_slice, cfg)
+        else:
+            signal = "NEUTRAL"
+    if signal != "NEUTRAL" and not _htf_confirms(signal, confirm_row, cfg):
+        return "NEUTRAL", regime_name
+    return signal, regime_name
+
+
+def _apply_circuit_breaker(state: Dict[str, object], balance: float, daily_start: float, weekly_start: float, row: pd.Series, cfg: Dict[str, float | int], ts_dt: datetime) -> tuple[bool, int]:
+    pause_until = int(state.get("pause_until", 0) or 0)
+    if pause_until and int(row["ts"]) < pause_until:
+        return True, 0
+    paused = False
+    triggers = 0
+    if daily_start > 0 and balance <= daily_start * (1 - float(cfg["cb_daily_loss_pct"]) / 100.0):
+        state["pause_until"] = int((ts_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp() * 1000)
+        paused = True
+    elif weekly_start > 0 and balance <= weekly_start * (1 - float(cfg["cb_weekly_loss_pct"]) / 100.0):
+        state["pause_until"] = int((ts_dt + timedelta(hours=24)).timestamp() * 1000)
+        paused = True
+    elif int(state.get("consecutive_losses", 0) or 0) >= int(cfg["cb_consecutive_losses"]):
+        state["pause_until"] = int((ts_dt + timedelta(hours=float(cfg["cb_cooldown_hours"]))).timestamp() * 1000)
+        paused = True
+    else:
+        recent = list(state.get("last_trade_results", []) or [])[-int(cfg["cb_rolling_window"]):]
+        if len(recent) >= 10 and (sum(recent) / max(1, len(recent))) < float(cfg["cb_rolling_winrate_min"]):
+            state["pause_until"] = int((ts_dt + timedelta(hours=float(cfg["cb_cooldown_hours"]) * 2.0)).timestamp() * 1000)
+            paused = True
+        else:
+            open_ = _safe_float(row.get("open"))
+            spike_pct = abs((_safe_float(row.get("high")) - _safe_float(row.get("low"))) / open_ * 100.0) if open_ > 0 else 0.0
+            if spike_pct > float(cfg["cb_volatility_spike_pct"]):
+                state["pause_until"] = int((ts_dt + timedelta(hours=1)).timestamp() * 1000)
+                paused = True
             else:
-                open_trough = min(open_trough, close)
-                if not open_breakeven_moved and move_r >= float(cfg.get("breakeven_r", 1.0)):
-                    buffer_pct = float(cfg.get("breakeven_buffer_pct", 0.0))
-                    new_sl = open_trade.entry_price * (1 - buffer_pct / 100.0)
-                    if open_sl <= 0 or new_sl < open_sl:
-                        open_sl = new_sl
-                        open_breakeven_moved = True
-                if move_r >= float(cfg.get("trail_start_r", 1.5)) and atr > 0:
-                    trail_candidate = close + atr * float(cfg.get("trail_atr_mult", 1.25))
-                    if open_sl <= 0 or trail_candidate < open_sl:
-                        open_sl = trail_candidate
+                equity_curve = list(state.get("equity_curve", []) or [])
+                if _max_drawdown_pct(equity_curve[-100:]) > 15.0:
+                    state["pause_until"] = int((ts_dt + timedelta(hours=24)).timestamp() * 1000)
+                    paused = True
+    if paused:
+        triggers = 1
+    return paused, triggers
+
+
+def simulate_mode(primary_df: pd.DataFrame, confirmation_df: pd.DataFrame, cfg: Dict[str, float | int], mode: str, start_balance: float = 5000.0) -> Dict[str, float | int]:
+    primary_df = multi_bot._compute_indicators(primary_df.copy(), cfg)
+    confirmation_df = multi_bot._compute_indicators(confirmation_df.copy(), cfg)
+    warmup = max(220, int(cfg.get("ema_trend", 200)) + 5)
+    balance = start_balance
+    equity_curve = [balance]
+    trades: List[SimTrade] = []
+    open_trade: SimTrade | None = None
+    cb_state: Dict[str, object] = {
+        "pause_until": 0,
+        "consecutive_losses": 0,
+        "last_trade_results": [],
+        "equity_curve": equity_curve,
+    }
+    current_day = None
+    current_week = None
+    daily_start = balance
+    weekly_start = balance
+    cb_triggers = 0
+
+    for i in range(warmup, len(primary_df) - 1):
+        row = primary_df.iloc[i]
+        ts_dt = datetime.fromtimestamp(int(row["ts"]) / 1000, tz=timezone.utc)
+        day_key = ts_dt.strftime("%Y-%m-%d")
+        week_key = f"{ts_dt.isocalendar().year}-W{ts_dt.isocalendar().week:02d}"
+        if current_day != day_key:
+            current_day = day_key
+            daily_start = balance
+        if current_week != week_key:
+            current_week = week_key
+            weekly_start = balance
+
+        signal, regime_name = _mode_signal(mode, primary_df.iloc[: i + 1], _confirmation_row(confirmation_df, int(row["ts"])), cfg)
+        price = _safe_float(row["close"])
+        atr = _safe_float(row.get("atr"))
+        if open_trade:
+            move_r = ((price - open_trade.entry_price) * open_trade.qty if open_trade.side == "LONG" else (open_trade.entry_price - price) * open_trade.qty) / max(open_trade.risk_usdt, 1e-9)
             if open_trade.side == "LONG":
-                hit_sl = low <= open_sl
-                hit_tp = high >= open_tp
-                if hit_sl and hit_tp:
-                    exit_price = open_sl
+                open_trade.peak_price = max(open_trade.peak_price, price)
+                if move_r >= float(cfg.get("trail_start_r", 1.5)) and atr > 0:
+                    open_trade.sl = max(open_trade.sl, open_trade.peak_price - 3.0 * atr)
+                if i - open_trade.entry_idx >= 24 and move_r < 0.3:
+                    exit_price = price
+                    reason = "EXIT_TIMEOUT"
+                elif _safe_float(row["low"]) <= open_trade.sl:
+                    exit_price = open_trade.sl
                     reason = "SL"
-                elif hit_sl:
-                    exit_price = open_sl
-                    reason = "SL"
-                elif hit_tp:
-                    exit_price = open_tp
+                elif _safe_float(row["high"]) >= open_trade.tp:
+                    exit_price = open_trade.tp
                     reason = "TP"
                 elif signal == "SHORT":
-                    exit_price = close
+                    exit_price = price
                     reason = "REV"
                 else:
                     exit_price = None
                     reason = ""
             else:
-                hit_sl = high >= open_sl
-                hit_tp = low <= open_tp
-                if hit_sl and hit_tp:
-                    exit_price = open_sl
+                open_trade.trough_price = min(open_trade.trough_price, price)
+                if move_r >= float(cfg.get("trail_start_r", 1.5)) and atr > 0:
+                    open_trade.sl = min(open_trade.sl, open_trade.trough_price + 3.0 * atr)
+                if i - open_trade.entry_idx >= 24 and move_r < 0.3:
+                    exit_price = price
+                    reason = "EXIT_TIMEOUT"
+                elif _safe_float(row["high"]) >= open_trade.sl:
+                    exit_price = open_trade.sl
                     reason = "SL"
-                elif hit_sl:
-                    exit_price = open_sl
-                    reason = "SL"
-                elif hit_tp:
-                    exit_price = open_tp
+                elif _safe_float(row["low"]) <= open_trade.tp:
+                    exit_price = open_trade.tp
                     reason = "TP"
                 elif signal == "LONG":
-                    exit_price = close
+                    exit_price = price
                     reason = "REV"
                 else:
                     exit_price = None
                     reason = ""
-
             if exit_price is not None:
-                pnl = _trade_pnl(open_trade.side, open_trade.entry_price, float(exit_price), open_qty)
+                pnl = (exit_price - open_trade.entry_price) * open_trade.qty if open_trade.side == "LONG" else (open_trade.entry_price - exit_price) * open_trade.qty
+                balance += pnl
                 open_trade.exit_ts = int(row["ts"])
                 open_trade.exit_price = float(exit_price)
-                open_trade.pnl = pnl
+                open_trade.pnl = float(pnl)
                 open_trade.reason = reason
                 trades.append(open_trade)
-                equity += pnl
-                peak_equity = max(peak_equity, equity)
-                if peak_equity > 0:
-                    max_drawdown = max(max_drawdown, (peak_equity - equity) / peak_equity * 100.0)
+                cb_state["consecutive_losses"] = 0 if pnl > 0 else int(cb_state.get("consecutive_losses", 0) or 0) + 1
+                last_results = list(cb_state.get("last_trade_results", []) or [])
+                last_results.append(1 if pnl > 0 else 0)
+                cb_state["last_trade_results"] = last_results[-int(cfg["cb_rolling_window"]):]
+                equity_curve.append(balance)
                 open_trade = None
-                open_qty = 0.0
-                open_sl = 0.0
-                open_tp = 0.0
-                open_risk_usdt = 0.0
-                open_peak = 0.0
-                open_trough = 0.0
-                open_breakeven_moved = False
+                cb_state["equity_curve"] = equity_curve
 
-        if open_trade is None and signal in {"LONG", "SHORT"} and float(next_row["open"]) > 0 and atr > 0:
-            entry = float(next_row["open"])
-            qty = (trade_usdt * float(cfg.get("leverage", 1))) / entry
-            sl_dist = atr * float(cfg.get("atr_mult", 1.5))
-            if signal == "LONG":
-                sl = entry - sl_dist
-                tp = entry + sl_dist * 2.0
+        paused, triggers = _apply_circuit_breaker(cb_state, balance, daily_start, weekly_start, row, cfg, ts_dt)
+        cb_triggers += triggers
+        if open_trade is not None or paused:
+            continue
+        if signal == "NEUTRAL" or atr <= 0:
+            continue
+        next_row = primary_df.iloc[i + 1]
+        entry = _safe_float(next_row["open"], price)
+        if mode == "meanrev" or regime_name == "RANGE":
+            stop_distance = atr * float(cfg.get("meanrev_atr_mult", 0.5))
+        elif mode == "breakout" or regime_name == "VOLATILE":
+            stop_distance = atr * float(cfg.get("volatile_atr_mult", 2.0) if regime_name == "VOLATILE" else cfg.get("breakout_atr_mult", 1.0))
+        else:
+            stop_distance = atr * float(cfg.get("atr_mult", 1.5))
+        trade_usdt = _trade_usdt(balance, entry, stop_distance, float(cfg.get("leverage", 2)))
+        qty = (trade_usdt * float(cfg.get("leverage", 2))) / entry if entry > 0 else 0.0
+        if qty <= 0:
+            continue
+        if signal == "LONG":
+            sl = entry - stop_distance
+            if mode == "meanrev" or regime_name == "RANGE":
+                sma20 = _safe_float(primary_df["close"].iloc[max(0, i - 19): i + 1].mean())
+                tp = sma20 if sma20 > entry else entry + stop_distance
+            elif mode == "breakout" or regime_name == "VOLATILE":
+                tp = entry + atr * float(cfg.get("breakout_tp_atr_mult", 3.0))
             else:
-                sl = entry + sl_dist
-                tp = entry - sl_dist * 2.0
-            open_trade = Trade(side=signal, signal_idx=i, entry_ts=int(next_row["ts"]), entry_price=entry)
-            open_qty = qty
-            open_sl = sl
-            open_tp = tp
-            open_risk_usdt = qty * sl_dist
-            open_peak = entry
-            open_trough = entry
-            open_breakeven_moved = False
+                tp = entry + stop_distance * 2.0
+        else:
+            sl = entry + stop_distance
+            if mode == "meanrev" or regime_name == "RANGE":
+                sma20 = _safe_float(primary_df["close"].iloc[max(0, i - 19): i + 1].mean())
+                tp = sma20 if 0 < sma20 < entry else entry - stop_distance
+            elif mode == "breakout" or regime_name == "VOLATILE":
+                tp = entry - atr * float(cfg.get("breakout_tp_atr_mult", 3.0))
+            else:
+                tp = entry - stop_distance * 2.0
+        open_trade = SimTrade(
+            side=signal,
+            entry_ts=int(next_row["ts"]),
+            entry_price=entry,
+            qty=qty,
+            sl=sl,
+            tp=tp,
+            risk_usdt=max(1e-9, qty * stop_distance),
+            strategy=mode,
+            regime=regime_name,
+            peak_price=entry,
+            trough_price=entry,
+            entry_idx=i + 1,
+        )
 
-    if open_trade is not None:
-        last_close = float(df.iloc[-1]["close"])
-        pnl = _trade_pnl(open_trade.side, open_trade.entry_price, last_close, open_qty)
-        open_trade.exit_ts = int(df.iloc[-1]["ts"])
-        open_trade.exit_price = last_close
-        open_trade.pnl = pnl
-        open_trade.reason = "EOD"
-        trades.append(open_trade)
-        equity += pnl
-        peak_equity = max(peak_equity, equity)
-        if peak_equity > 0:
-            max_drawdown = max(max_drawdown, (peak_equity - equity) / peak_equity * 100.0)
-        open_risk_usdt = 0.0
-        open_peak = 0.0
-        open_trough = 0.0
-        open_breakeven_moved = False
-
-    pnls = [t.pnl for t in trades]
-    wins = sum(1 for p in pnls if p > 0)
-    losses = sum(1 for p in pnls if p < 0)
-    profit_factor = (sum(p for p in pnls if p > 0) / abs(sum(p for p in pnls if p < 0))) if any(p < 0 for p in pnls) else float("inf") if any(p > 0 for p in pnls) else 0.0
-    total = len(trades)
-    win_rate = (wins / total * 100.0) if total else 0.0
-    total_pnl = sum(pnls)
+    realized_pnls = [trade.pnl for trade in trades]
+    wins = len([p for p in realized_pnls if p > 0])
+    losses = len([p for p in realized_pnls if p <= 0])
+    r_values = [trade.pnl / trade.risk_usdt for trade in trades if trade.risk_usdt > 0]
+    holding_bars = [max(1, int((trade.exit_ts - trade.entry_ts) / (int(cfg["primary_timeframe"]) * 60 * 1000))) for trade in trades if trade.exit_ts]
     return {
-        "trades": [t.__dict__ for t in trades],
-        "total": total,
-        "pnl": total_pnl,
+        "mode": mode,
+        "trades": len(trades),
+        "pnl_pct": ((balance - start_balance) / start_balance * 100.0) if start_balance else 0.0,
+        "win_pct": (wins / max(1, len(trades))) * 100.0,
+        "sharpe": _annualized_sharpe(r_values, holding_bars, int(cfg["primary_timeframe"])),
+        "maxdd_pct": _max_drawdown_pct(equity_curve),
+        "cb_triggers": cb_triggers,
         "wins": wins,
         "losses": losses,
-        "win_rate": win_rate,
-        "profit_factor": profit_factor,
-        "max_drawdown": max_drawdown,
     }
 
 
-def _windows(df: pd.DataFrame, folds: int) -> List[Tuple[int, int]]:
-    if folds <= 1 or len(df) < 500:
-        return [(0, len(df))]
-    start = max(220, int(len(df) * 0.2))
-    usable = len(df) - start
-    if usable <= 0:
-        return [(0, len(df))]
-    step = max(1, usable // folds)
-    windows = []
-    for i in range(folds):
-        s = start + i * step
-        e = len(df) if i == folds - 1 else min(len(df), s + step)
-        if s < e:
-            windows.append((s, e))
-    return windows or [(0, len(df))]
+def compare_modes(days: int = 180, symbol: str = "BTCUSDT") -> List[Dict[str, float | int]]:
+    cfg = multi_bot._get_symbol_config(symbol)
+    primary_df = fetch_history(symbol, int(cfg["primary_timeframe"]), days)
+    confirmation_df = fetch_history(symbol, int(cfg["confirmation_timeframe"]), days)
+    results = []
+    for mode in ("trend", "meanrev", "breakout", "regime"):
+        mode_cfg = dict(cfg)
+        mode_cfg["strategy_mode"] = mode
+        results.append(simulate_mode(primary_df, confirmation_df, mode_cfg, mode))
+    return results
 
 
-def compare_symbol(symbol: str, days: int, folds: int, trade_usdt: float) -> Dict[str, object]:
-    symbol = bot_config.normalize_symbol(symbol)
-    base_cfg = dict(bot_config.DEFAULT_CONFIG)
-    base_cfg.update(
-        {
-            "timeframe": int(bot_config.DEFAULT_CONFIG.get("timeframe", 5)),
-            "leverage": int(bot_config.DEFAULT_CONFIG.get("leverage", 2)),
-            "ema_fast": 9,
-            "ema_slow": 21,
-            "ema_trend": 200,
-            "rsi_period": 14,
-            "adx_period": 14,
-            "atr_period": 14,
-            "atr_mult": 1.5,
-            "supertrend_period": 14,
-            "supertrend_mult": 3.5,
-            "adx_threshold": 25,
-            "volume_mult": 1.2,
-            "rsi_min": 30,
-            "rsi_max": 70,
-            "ml_threshold": 0.55,
-            "breakeven_r": 1.0,
-            "breakeven_buffer_pct": 0.0,
-            "trail_start_r": 1.5,
-            "trail_atr_mult": 1.25,
-        }
-    )
-    spec_cfg = multi_bot._get_symbol_config(symbol)
-    spec_cfg["timeframe"] = int(spec_cfg.get("timeframe", 5))
-
-    timeframe = int(spec_cfg.get("timeframe", 5))
-    df = fetch_history(symbol, timeframe, days=days)
-    windows = _windows(df, folds)
-
-    baseline_runs = []
-    specialized_runs = []
-    for start, end in windows:
-        window_df = df.iloc[start:end].reset_index(drop=True)
-        baseline_runs.append(simulate(window_df, base_cfg, trade_usdt))
-        specialized_runs.append(simulate(window_df, spec_cfg, trade_usdt))
-
-    def agg(runs):
-        pnl = sum(float(r["pnl"]) for r in runs)
-        total = sum(int(r["total"]) for r in runs)
-        wins = sum(int(r["wins"]) for r in runs)
-        losses = sum(int(r["losses"]) for r in runs)
-        win_rate = (wins / total * 100.0) if total else 0.0
-        profit_factors = [float(r["profit_factor"]) for r in runs if r["profit_factor"] != float("inf")]
-        max_drawdown = max((float(r["max_drawdown"]) for r in runs), default=0.0)
-        return {
-            "pnl": pnl,
-            "total": total,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": win_rate,
-            "profit_factor": (sum(profit_factors) / len(profit_factors)) if profit_factors else float("inf"),
-            "max_drawdown": max_drawdown,
-        }
-
-    baseline = agg(baseline_runs)
-    specialized = agg(specialized_runs)
-    better = (
-        specialized["pnl"] > baseline["pnl"]
-        and specialized["win_rate"] >= baseline["win_rate"]
-        and specialized["max_drawdown"] <= baseline["max_drawdown"] * 1.10 + 0.01
-    )
-    return {
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "days": days,
-        "folds": folds,
-        "baseline": baseline,
-        "specialized": specialized,
-        "better": better,
-        "windows": [
-            {
-                "baseline": baseline_runs[idx],
-                "specialized": specialized_runs[idx],
-            }
-            for idx in range(len(windows))
-        ],
-    }
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Walk-forward comparison: baseline vs specialized per asset")
-    parser.add_argument("--days", type=int, default=60)
-    parser.add_argument("--folds", type=int, default=4)
-    parser.add_argument("--trade-usdt", type=float, default=50.0)
-    parser.add_argument("--symbols", type=str, default="BTCUSDT")
-    args = parser.parse_args()
-
-    symbols = bot_config.parse_symbols(args.symbols)
-    report = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "days": args.days,
-        "folds": args.folds,
-        "trade_usdt": args.trade_usdt,
-        "results": [],
-    }
-
-    overall_baseline_pnl = 0.0
-    overall_specialized_pnl = 0.0
-    overall_baseline_win_rate = []
-    overall_specialized_win_rate = []
-    approved_symbols = []
-
-    for symbol in symbols:
-        result = compare_symbol(symbol, args.days, args.folds, args.trade_usdt)
-        report["results"].append(result)
-        overall_baseline_pnl += float(result["baseline"]["pnl"])
-        overall_specialized_pnl += float(result["specialized"]["pnl"])
-        overall_baseline_win_rate.append(float(result["baseline"]["win_rate"]))
-        overall_specialized_win_rate.append(float(result["specialized"]["win_rate"]))
-        if result["better"]:
-            approved_symbols.append(symbol)
-
-    report["summary"] = {
-        "baseline_pnl": overall_baseline_pnl,
-        "specialized_pnl": overall_specialized_pnl,
-        "baseline_avg_win_rate": sum(overall_baseline_win_rate) / len(overall_baseline_win_rate) if overall_baseline_win_rate else 0.0,
-        "specialized_avg_win_rate": sum(overall_specialized_win_rate) / len(overall_specialized_win_rate) if overall_specialized_win_rate else 0.0,
-        "approved_symbols": approved_symbols,
-        "specialization_wins": len(approved_symbols),
-        "specialization_losses": len(symbols) - len(approved_symbols),
-    }
-
-    OUTPUT_PATH.write_text(json.dumps(report, indent=2), encoding="utf-8")
-
-    print(json.dumps(report["summary"], indent=2))
-    for result in report["results"]:
+def _print_table(results: List[Dict[str, float | int]]) -> None:
+    print("mode      | trades | pnl%  | win%  | sharpe | maxdd% | cb_triggers")
+    for row in results:
         print(
-            f"{result['symbol']}: baseline pnl={result['baseline']['pnl']:.2f}, "
-            f"specialized pnl={result['specialized']['pnl']:.2f}, "
-            f"baseline win={result['baseline']['win_rate']:.1f}%, "
-            f"specialized win={result['specialized']['win_rate']:.1f}%, "
-            f"better={result['better']}"
+            f"{str(row['mode']):<9} | {int(row['trades']):>6} | {float(row['pnl_pct']):>5.1f} | "
+            f"{float(row['win_pct']):>5.1f} | {float(row['sharpe']):>6.2f} | {float(row['maxdd_pct']):>6.2f} | {int(row['cb_triggers']):>11}"
         )
 
 
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Backtest BTC strategy modes on higher timeframes")
+    parser.add_argument("--days", type=int, default=180)
+    args = parser.parse_args()
+    results = compare_modes(days=args.days, symbol="BTCUSDT")
+    _print_table(results)
+    best = sorted(results, key=lambda item: (float(item["sharpe"]), float(item["pnl_pct"])), reverse=True)[0]
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "days": args.days,
+        "results": results,
+        "best_mode": best["mode"],
+    }
+    OUTPUT_PATH.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if best["mode"] != "regime":
+        print(f"warning: regime no fue el mejor modo; mejor sharpe={best['mode']}")
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
