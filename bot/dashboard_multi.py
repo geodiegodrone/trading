@@ -31,6 +31,14 @@ OPEN_TRADE_FILE = ROOT / "open_trade_id.json"
 
 SYMBOLS = ["BTCUSDT"]
 TAB_SYMBOLS = ["BTCUSDT"]
+CHART_TIMEFRAMES = {
+    "1m": 1,
+    "5m": 5,
+    "15m": 15,
+    "1h": 60,
+    "4h": 240,
+    "1d": 1440,
+}
 
 
 def _load_json(path, default):
@@ -153,6 +161,13 @@ def _fetch_candles(symbol, timeframe=5, limit=250):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.sort_values("ts").reset_index(drop=True)
     return df
+
+
+def _parse_chart_timeframe(raw: str | None) -> tuple[str, int]:
+    label = str(raw or "1d").strip().lower()
+    if label in CHART_TIMEFRAMES:
+        return label, CHART_TIMEFRAMES[label]
+    return "1d", CHART_TIMEFRAMES["1d"]
 
 
 
@@ -684,6 +699,68 @@ def _build_symbol_payload(symbol):
     }
 
 
+def _build_chart_payload(symbol: str, timeframe_raw: str = "1d"):
+    timeframe_label, timeframe_minutes = _parse_chart_timeframe(timeframe_raw)
+    cfg = get_symbol_config(symbol)
+    df = _fetch_candles(symbol, timeframe_minutes, 260)
+    df = _compute_indicators(df, cfg)
+    updated_at = datetime.now(timezone.utc)
+    if df.empty or len(df) < 50:
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe_label,
+            "price": 0.0,
+            "ema9": 0.0,
+            "ema21": 0.0,
+            "rsi": 0.0,
+            "candles": [],
+            "ohlc": None,
+            "updated_at": updated_at.isoformat(),
+            "updated_label": updated_at.strftime("%H:%M:%S UTC"),
+        }
+    last = df.iloc[-1].to_dict()
+    prev_close = _as_float(df.iloc[-2]["close"]) if len(df) > 1 else _as_float(last.get("open"))
+    cols = df.attrs.get("indicator_cols", {})
+    latest_ts = int(_as_float(last.get("ts"), 0))
+    open_price = _as_float(last.get("open"))
+    high_price = _as_float(last.get("high"))
+    low_price = _as_float(last.get("low"))
+    close_price = _as_float(last.get("close"))
+    change_pct = ((close_price - prev_close) / prev_close * 100.0) if prev_close else 0.0
+    range_pct = ((high_price - low_price) / open_price * 100.0) if open_price else 0.0
+    candles = [
+        {
+            "ts": int(row["ts"]),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": float(row["volume"]),
+        }
+        for _, row in df.tail(220).iterrows()
+    ]
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe_label,
+        "price": close_price,
+        "ema9": _as_float(last.get(cols.get("ema_fast", "ema9"))),
+        "ema21": _as_float(last.get(cols.get("ema_slow", "ema21"))),
+        "rsi": _as_float(last.get("rsi")),
+        "candles": candles,
+        "ohlc": {
+            "ts": latest_ts,
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "change_pct": change_pct,
+            "range_pct": range_pct,
+        },
+        "updated_at": updated_at.isoformat(),
+        "updated_label": updated_at.strftime("%H:%M:%S UTC"),
+    }
+
+
 def _portfolio_payload():
     balance = _get_balance()
     trades = trade_log.get_all_trades()
@@ -812,10 +889,10 @@ def _agents_payload():
             {
                 "id": "market-scout",
                 "name": "Market Scout",
-                "role": "Explora señales y vigila BTC, ETH, XRP, SOL, XAU y XAG.",
+                "role": "Explora señales y vigila BTCUSDT en Binance.",
                 "status": "active" if ready_symbols else "idle",
                 "activity": "reading" if ready_symbols else "idle",
-                "task": "Detectando activos con confluencia lista para entrada.",
+                "task": "Detectando confluencia lista para entrada en BTCUSDT.",
                 "energy": min(100, 30 + len(ready_symbols) * 15),
                 "accent": "#7dd3fc",
                 "palette": ["#111827", "#22c55e", "#fbbf24"],
@@ -966,7 +1043,14 @@ async def _healthcheck_loop():
 
 @app.on_event("startup")
 async def startup():
-    market_stream.start([(symbol, int(get_symbol_config(symbol).get("timeframe", os.getenv("TIMEFRAME", "5")))) for symbol in SYMBOLS])
+    stream_specs = {
+        (symbol, int(get_symbol_config(symbol).get("timeframe", os.getenv("TIMEFRAME", "5"))))
+        for symbol in SYMBOLS
+    }
+    for symbol in SYMBOLS:
+        for minutes in CHART_TIMEFRAMES.values():
+            stream_specs.add((symbol, minutes))
+    market_stream.start(sorted(stream_specs))
     asyncio.create_task(_refresh_cache())
     asyncio.create_task(_healthcheck_loop())
 
@@ -1041,6 +1125,18 @@ async def ws_agents(websocket: WebSocket):
             _cache["agents"] = payload
             await websocket.send_json(payload)
             await asyncio.sleep(2)
+    except Exception:
+        pass
+
+
+@app.websocket("/ws/chart/{symbol}/{timeframe}")
+async def ws_chart(websocket: WebSocket, symbol: str, timeframe: str):
+    await websocket.accept()
+    try:
+        while True:
+            payload = await asyncio.to_thread(_build_chart_payload, symbol, timeframe)
+            await websocket.send_json(payload)
+            await asyncio.sleep(1)
     except Exception:
         pass
 

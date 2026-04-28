@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Panel BTC del bot de trading</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111217'/%3E%3Ccircle cx='16' cy='16' r='8' fill='%23f59e0b'/%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -529,15 +530,121 @@
 
     .chart-shell {
       position: relative;
-      height: 620px;
       min-height: 620px;
       border-radius: 18px;
       overflow: hidden;
       background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)), #111217;
       border: 1px solid rgba(255,255,255,0.05);
+      padding: 14px;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 12px;
     }
 
-    .chart-shell > div {
+    .chart-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .timeframe-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .timeframe-label,
+    .chart-info-label {
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+
+    .timeframe-btn {
+      appearance: none;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.02);
+      color: #cbd5e1;
+      border-radius: 10px;
+      padding: 7px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: border-color .15s ease, background .15s ease, color .15s ease;
+    }
+
+    .timeframe-btn:hover {
+      border-color: rgba(255,255,255,0.18);
+      background: rgba(255,255,255,0.04);
+    }
+
+    .timeframe-btn.active {
+      border-color: rgba(245, 158, 11, 0.35);
+      background: rgba(245, 158, 11, 0.10);
+      color: #fde68a;
+    }
+
+    .chart-info {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      color: #d7dde7;
+      font-size: 13px;
+      line-height: 1.5;
+      border-top: 1px solid rgba(255,255,255,0.04);
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      padding: 10px 0;
+    }
+
+    .chart-ohlc {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .chart-ohlc .up { color: var(--green); }
+    .chart-ohlc .down { color: var(--red); }
+    .chart-ohlc .muted { color: var(--muted); }
+
+    .chart-panels {
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) 128px;
+      gap: 10px;
+      min-height: 0;
+      height: 100%;
+    }
+
+    .price-pane,
+    .volume-pane {
+      position: relative;
+      border-radius: 14px;
+      overflow: hidden;
+      background: #111217;
+      border: 1px solid rgba(255,255,255,0.04);
+    }
+
+    .price-pane::before,
+    .volume-pane::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent 18%);
+    }
+
+    .price-pane > div,
+    .volume-pane > div,
+    .price-pane,
+    .volume-pane {
       width: 100%;
       height: 100%;
     }
@@ -1815,7 +1922,7 @@
       .portfolio-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .grid { grid-template-columns: 1fr; }
       .agents-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .chart-shell { height: 520px; min-height: 520px; }
+      .chart-shell { min-height: 560px; }
     }
 
     @media (max-width: 720px) {
@@ -1826,7 +1933,8 @@
       .tab-btn { flex: 1 1 auto; justify-content: center; }
       .portfolio-grid { grid-template-columns: 1fr; }
       .agents-grid { grid-template-columns: 1fr; }
-      .chart-shell { height: 420px; min-height: 420px; }
+      .chart-shell { min-height: 460px; }
+      .chart-panels { grid-template-rows: minmax(0, 1fr) 110px; }
     }
   </style>
 </head>
@@ -1918,6 +2026,7 @@
 
   <script>
     const SYMBOLS = ['BTCUSDT'];
+    const CHART_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'];
     const SYMBOL_META = {
       BTCUSDT: { label: 'BTC', accent: '#f59e0b' },
     };
@@ -1926,7 +2035,7 @@
     const state = {
       portfolio: null,
       agents: null,
-      symbols: Object.fromEntries(SYMBOLS.map((s) => [s, { snapshot: null, chart: null }]))
+      symbols: Object.fromEntries(SYMBOLS.map((s) => [s, { snapshot: null, chart: null, chartTimeframe: '1d', chartSnapshot: null }]))
     };
 
     const tabs = document.getElementById('tabs');
@@ -1935,6 +2044,7 @@
     const activityBuffers = Object.fromEntries(SYMBOLS.map((symbol) => [shortSymbol(symbol), []]));
     const lwCharts = {};
     const lwSeries = {};
+    const chartSockets = {};
 
     function shortSymbol(symbol) {
       return SYMBOL_SLUG[symbol] || String(symbol || '').toLowerCase();
@@ -2110,7 +2220,20 @@
                 </div>
               </aside>
               <main class="main">
-                <div class="chart-shell"><div id="chart-${shortSymbol(symbol)}"></div></div>
+                <div class="chart-shell">
+                  <div class="chart-toolbar">
+                    <div class="timeframe-strip" id="tf-${shortSymbol(symbol)}"></div>
+                    <div class="chart-info-label" id="chart-updated-${shortSymbol(symbol)}">--</div>
+                  </div>
+                  <div class="chart-info">
+                    <div class="chart-ohlc" id="ohlc-${shortSymbol(symbol)}">Cargando velas...</div>
+                    <div class="chart-info-label">Binance Futures Demo</div>
+                  </div>
+                  <div class="chart-panels">
+                    <div class="price-pane"><div id="chart-${shortSymbol(symbol)}"></div></div>
+                    <div class="volume-pane"><div id="volume-${shortSymbol(symbol)}"></div></div>
+                  </div>
+                </div>
               </main>
             </div>
 
@@ -2583,6 +2706,31 @@
 
     function buildSymbolPanels() {
       symbolPanels.innerHTML = SYMBOLS.map(panelTemplate).join('');
+      SYMBOLS.forEach((symbol) => {
+        buildChartControls(symbol);
+      });
+    }
+
+    function buildChartControls(symbol) {
+      const host = document.getElementById(`tf-${shortSymbol(symbol)}`);
+      if (!host) return;
+      const active = state.symbols[symbol]?.chartTimeframe || '1d';
+      host.innerHTML = `
+        <span class="timeframe-label">Tiempo</span>
+        ${CHART_TIMEFRAMES.map((tf) => `
+          <button type="button" class="timeframe-btn ${tf === active ? 'active' : ''}" data-symbol="${symbol}" data-tf="${tf}">
+            ${tf.toUpperCase()}
+          </button>
+        `).join('')}
+      `;
+      host.querySelectorAll('.timeframe-btn').forEach((button) => {
+        button.addEventListener('click', () => {
+          const timeframe = button.dataset.tf || '1d';
+          state.symbols[symbol].chartTimeframe = timeframe;
+          buildChartControls(symbol);
+          connectChartStream(symbol, timeframe);
+        });
+      });
     }
 
     function switchTab(tab) {
@@ -2596,9 +2744,9 @@
         setTimeout(buildAgentsPanel, 30);
       }
       if (SYMBOLS.includes(tab)) {
-        const snapshot = state.symbols[tab]?.snapshot;
+        const snapshot = state.symbols[tab]?.chartSnapshot;
         if (snapshot?.candles?.length) {
-          setTimeout(() => updateChart(tab, snapshot.candles || []), 50);
+          setTimeout(() => updateChartPayload(tab, snapshot), 50);
         }
       }
     }
@@ -2893,7 +3041,7 @@
     }
 
     function candlesToLwData(candles) {
-      return candles.map((c) => ({
+      return (candles || []).map((c) => ({
         time: Math.floor(Number(c.ts) / 1000),
         open: Number(c.open),
         high: Number(c.high),
@@ -2902,69 +3050,199 @@
       }));
     }
 
-    function calcEmaSeries(values, length) {
+    function candlesToVolumeData(candles) {
+      return (candles || []).map((c) => ({
+        time: Math.floor(Number(c.ts) / 1000),
+        value: Number(c.volume || 0),
+        color: Number(c.close) >= Number(c.open) ? 'rgba(54, 211, 153, 0.82)' : 'rgba(248, 113, 113, 0.82)',
+      }));
+    }
+
+    function calcSmaSeries(values, length) {
       const series = [];
-      const alpha = 2 / (length + 1);
-      let prev = null;
-      for (const value of values) {
-        if (prev === null) prev = value;
-        prev = value * alpha + prev * (1 - alpha);
-        series.push(prev);
+      let rollingSum = 0;
+      for (let i = 0; i < values.length; i += 1) {
+        rollingSum += Number(values[i] || 0);
+        if (i >= length) rollingSum -= Number(values[i - length] || 0);
+        series.push(i >= length - 1 ? (rollingSum / length) : null);
       }
       return series;
     }
 
+    function zippedLineData(times, values) {
+      const out = [];
+      for (let i = 0; i < times.length; i += 1) {
+        const value = values[i];
+        if (value === null || value === undefined || Number.isNaN(Number(value))) continue;
+        out.push({ time: times[i], value: Number(value) });
+      }
+      return out;
+    }
+
+    function addLineSeries(chart, options) {
+      if (typeof chart.addSeries === 'function') {
+        return chart.addSeries(LightweightCharts.LineSeries, options);
+      }
+      return chart.addLineSeries(options);
+    }
+
+    function addHistogramSeries(chart, options) {
+      if (typeof chart.addSeries === 'function') {
+        return chart.addSeries(LightweightCharts.HistogramSeries, options);
+      }
+      return chart.addHistogramSeries(options);
+    }
+
     function getChart(symbol) {
-      if (lwCharts[symbol]) return lwCharts[symbol].chart;
-      const container = document.getElementById(`chart-${shortSymbol(symbol)}`);
-      if (!container) return null;
-      const shell = container.parentElement;
-      const width = shell?.clientWidth || container.clientWidth || 600;
-      const height = shell?.clientHeight || container.clientHeight || 620;
-      const chart = LightweightCharts.createChart(container, {
-        width,
-        height,
+      if (lwCharts[symbol]) return lwCharts[symbol];
+      const priceContainer = document.getElementById(`chart-${shortSymbol(symbol)}`);
+      const volumeContainer = document.getElementById(`volume-${shortSymbol(symbol)}`);
+      if (!priceContainer || !volumeContainer) return null;
+      const priceHost = priceContainer.parentElement;
+      const volumeHost = volumeContainer.parentElement;
+      const commonOptions = {
         layout: {
           background: { color: '#111217' },
           textColor: '#cbd5e1',
+          attributionLogo: false,
         },
         grid: {
           vertLines: { color: 'rgba(255,255,255,0.05)' },
           horzLines: { color: 'rgba(255,255,255,0.05)' },
         },
-        rightPriceScale: { borderColor: 'rgba(255,255,255,0.05)' },
-        timeScale: { timeVisible: true, secondsVisible: false },
-        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: {
+          borderColor: 'rgba(255,255,255,0.08)',
+        },
+        crosshair: {
+          mode: LightweightCharts.CrosshairMode.Normal,
+        },
+      };
+      const priceChart = LightweightCharts.createChart(priceContainer, {
+        ...commonOptions,
+        width: priceHost?.clientWidth || priceContainer.clientWidth || 600,
+        height: priceHost?.clientHeight || priceContainer.clientHeight || 460,
+        timeScale: {
+          timeVisible: true,
+          secondsVisible: false,
+          borderColor: 'rgba(255,255,255,0.08)',
+        },
       });
-      const seriesOptions = {
+      const volumeChart = LightweightCharts.createChart(volumeContainer, {
+        ...commonOptions,
+        width: volumeHost?.clientWidth || volumeContainer.clientWidth || 600,
+        height: volumeHost?.clientHeight || volumeContainer.clientHeight || 128,
+        leftPriceScale: { visible: false },
+        rightPriceScale: {
+          borderColor: 'rgba(255,255,255,0.08)',
+          scaleMargins: { top: 0.14, bottom: 0.0 },
+        },
+        timeScale: {
+          timeVisible: true,
+          secondsVisible: false,
+          borderColor: 'rgba(255,255,255,0.08)',
+        },
+      });
+      const candleOptions = {
         upColor: '#36d399',
         downColor: '#f87171',
         borderVisible: false,
         wickUpColor: '#36d399',
         wickDownColor: '#f87171',
       };
-      const candles = typeof chart.addSeries === 'function'
-        ? chart.addSeries(LightweightCharts.CandlestickSeries, seriesOptions)
-        : chart.addCandlestickSeries(seriesOptions);
-      lwCharts[symbol] = { chart, container };
-      lwSeries[symbol] = { candles };
-      return chart;
+      const candles = typeof priceChart.addSeries === 'function'
+        ? priceChart.addSeries(LightweightCharts.CandlestickSeries, candleOptions)
+        : priceChart.addCandlestickSeries(candleOptions);
+      const ma7 = addLineSeries(priceChart, { color: '#facc15', lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+      const ma25 = addLineSeries(priceChart, { color: '#ec4899', lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+      const ma99 = addLineSeries(priceChart, { color: '#a78bfa', lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+      const volume = addHistogramSeries(volumeChart, {
+        priceFormat: { type: 'volume' },
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      const volMa5 = addLineSeries(volumeChart, { color: '#67e8f9', lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+      const volMa20 = addLineSeries(volumeChart, { color: '#fb7185', lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+      const bundle = {
+        priceChart,
+        volumeChart,
+        priceContainer,
+        volumeContainer,
+        syncing: false,
+      };
+      const syncRange = (source, target) => {
+        source.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+          if (!range || bundle.syncing) return;
+          bundle.syncing = true;
+          target.timeScale().setVisibleLogicalRange(range);
+          bundle.syncing = false;
+        });
+      };
+      syncRange(priceChart, volumeChart);
+      syncRange(volumeChart, priceChart);
+      lwCharts[symbol] = bundle;
+      lwSeries[symbol] = { candles, ma7, ma25, ma99, volume, volMa5, volMa20 };
+      return bundle;
     }
 
-    function updateChart(symbol, candles) {
-      const chart = getChart(symbol);
+    function resizeChart(symbol) {
+      const charts = lwCharts[symbol];
+      if (!charts) return;
+      const priceHost = charts.priceContainer.parentElement;
+      const volumeHost = charts.volumeContainer.parentElement;
+      charts.priceChart.resize(priceHost?.clientWidth || charts.priceContainer.clientWidth || 600, priceHost?.clientHeight || charts.priceContainer.clientHeight || 460, true);
+      charts.volumeChart.resize(volumeHost?.clientWidth || charts.volumeContainer.clientWidth || 600, volumeHost?.clientHeight || charts.volumeContainer.clientHeight || 128, true);
+    }
+
+    function renderChartMeta(symbol, payload) {
+      const updatedEl = document.getElementById(`chart-updated-${shortSymbol(symbol)}`);
+      if (updatedEl) updatedEl.textContent = `Actualizado ${payload?.updated_label || '--'} · ${String(payload?.timeframe || '1d').toUpperCase()}`;
+      const ohlcEl = document.getElementById(`ohlc-${shortSymbol(symbol)}`);
+      if (!ohlcEl) return;
+      const ohlc = payload?.ohlc;
+      if (!ohlc) {
+        ohlcEl.textContent = 'Esperando velas...';
+        return;
+      }
+      const changePct = Number(ohlc.change_pct || 0);
+      const rangePct = Number(ohlc.range_pct || 0);
+      const cls = changePct >= 0 ? 'up' : 'down';
+      ohlcEl.innerHTML = `
+        <span class="muted">${new Date(Number(ohlc.ts || 0)).toLocaleDateString('en-CA')}</span>
+        <span>Abrir <strong>${formatNum(ohlc.open)}</strong></span>
+        <span>Máximo <strong>${formatNum(ohlc.high)}</strong></span>
+        <span>Mínimo <strong>${formatNum(ohlc.low)}</strong></span>
+        <span>Cerrar <strong>${formatNum(ohlc.close)}</strong></span>
+        <span class="${cls}">Cambio ${changePct.toFixed(2)}%</span>
+        <span class="muted">Rango ${rangePct.toFixed(2)}%</span>
+      `;
+    }
+
+    function updateChartPayload(symbol, payload) {
+      state.symbols[symbol].chartSnapshot = payload;
+      setMarketSnapshot(symbol, payload || {});
+      renderChartMeta(symbol, payload || {});
+      const bundle = getChart(symbol);
       const series = lwSeries[symbol];
-      const chartState = lwCharts[symbol];
-      if (!chart || !series || !chartState) return;
-      const shell = chartState.container.parentElement;
-      const width = shell?.clientWidth || chartState.container.clientWidth || 600;
-      const height = shell?.clientHeight || chartState.container.clientHeight || 620;
-      chartState.container.style.width = '100%';
-      chartState.container.style.height = '100%';
-      chart.resize(width, height, true);
-      const data = candlesToLwData(candles || []);
-      series.candles.setData(data);
-      chart.timeScale().fitContent();
+      if (!bundle || !series) return;
+      resizeChart(symbol);
+      const candles = payload?.candles || [];
+      const priceData = candlesToLwData(candles);
+      const volumeData = candlesToVolumeData(candles);
+      const times = priceData.map((item) => item.time);
+      const closes = priceData.map((item) => item.close);
+      const volumes = volumeData.map((item) => item.value);
+      series.candles.setData(priceData);
+      series.ma7.setData(zippedLineData(times, calcSmaSeries(closes, 7)));
+      series.ma25.setData(zippedLineData(times, calcSmaSeries(closes, 25)));
+      series.ma99.setData(zippedLineData(times, calcSmaSeries(closes, 99)));
+      series.volume.setData(volumeData);
+      series.volMa5.setData(zippedLineData(times, calcSmaSeries(volumes, 5)));
+      series.volMa20.setData(zippedLineData(times, calcSmaSeries(volumes, 20)));
+      if (state.symbols[symbol].lastChartTf !== payload?.timeframe) {
+        bundle.priceChart.timeScale().fitContent();
+        bundle.volumeChart.timeScale().fitContent();
+        state.symbols[symbol].lastChartTf = payload?.timeframe;
+      }
     }
 
     function updateSymbol(symbol, d) {
@@ -2972,13 +3250,11 @@
       if (d?.events) updateActivity(d.events);
       const updatedEl = document.getElementById(`updated-${symbol}`);
       if (updatedEl) updatedEl.textContent = d?.updated_label || '--';
-      setMarketSnapshot(symbol, d || {});
       setSignal(symbol, d.signal);
       setPosition(symbol, d.position);
       setKpis(symbol, d.kpis || {});
       setIndicators(symbol, d.indicators || {});
       setTradeGate(symbol, d.trade_gate || {});
-      updateChart(symbol, d.candles || []);
       pushLog(symbol, d);
       updateTabDot(symbol, d);
     }
@@ -3109,6 +3385,15 @@
       return ws;
     }
 
+    function connectChartStream(symbol, timeframe) {
+      const tf = String(timeframe || '1d').toLowerCase();
+      const prev = chartSockets[symbol];
+      if (prev) {
+        try { prev.onclose = null; prev.close(); } catch (err) { console.error(err); }
+      }
+      chartSockets[symbol] = connectWS(`ws://localhost:8000/ws/chart/${symbol}/${tf}`, (payload) => updateChartPayload(symbol, payload));
+    }
+
     buildTabs();
     buildSymbolPanels();
     const healthBtn = document.getElementById('healthCheckBtn');
@@ -3116,8 +3401,10 @@
     connectWS('ws://localhost:8000/ws/portfolio', renderPortfolio);
     connectWS('ws://localhost:8000/ws/agents', renderAgents);
     SYMBOLS.forEach((symbol) => connectWS(`ws://localhost:8000/ws/${symbol}`, (d) => updateSymbol(symbol, d)));
+    SYMBOLS.forEach((symbol) => connectChartStream(symbol, state.symbols[symbol]?.chartTimeframe || '1d'));
     SYMBOLS.forEach((symbol) => renderActivity(shortSymbol(symbol)));
     connectWS('ws://localhost:8000/ws/activity', updateActivity);
+    window.addEventListener('resize', () => SYMBOLS.forEach((symbol) => resizeChart(symbol)));
     switchTab('portfolio');
     loadLatestHealthCheck();
     setInterval(loadLatestHealthCheck, 300000);

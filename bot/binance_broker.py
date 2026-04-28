@@ -33,6 +33,17 @@ _BALANCE_CACHE_FILE = BASE_DIR / "balance_cache.json"
 _DAILY_BALANCE_FILE = BASE_DIR / "daily_balance.json"
 
 
+def _interval_label(timeframe: int) -> str:
+    minutes = int(timeframe)
+    if minutes < 60:
+        return f"{minutes}m"
+    if minutes % 1440 == 0:
+        return f"{minutes // 1440}d"
+    if minutes % 60 == 0:
+        return f"{minutes // 60}h"
+    return f"{minutes}m"
+
+
 def _get_client():
     if not hasattr(_local, "client"):
         if Client is None:
@@ -302,5 +313,5 @@ def set_leverage(symbol: str, leverage: int) -> None:
 
 
 def get_kline(symbol: str, timeframe: int, limit: int = 250):
-    interval = f"{timeframe}m"
+    interval = _interval_label(timeframe)
     return _with_retry(_get_client().futures_klines, symbol=symbol, interval=interval, limit=limit)

@@ -25,6 +25,19 @@ _max_candles = 600
 _seed_limit = 250
 
 
+def _interval_label(timeframe: int) -> str:
+    minutes = int(timeframe)
+    if minutes < 60:
+        return f"{minutes}m"
+    if minutes % 1440 == 0:
+        days = minutes // 1440
+        return f"{days}d"
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        return f"{hours}h"
+    return f"{minutes}m"
+
+
 def _key(symbol: str, timeframe: int) -> Tuple[str, int]:
     return normalize_symbol(symbol), int(timeframe)
 
@@ -90,7 +103,7 @@ def _upsert(symbol: str, timeframe: int, candle: dict) -> None:
 
 
 async def _worker(symbol: str, timeframe: int) -> None:
-    stream = f"{normalize_symbol(symbol).lower()}@kline_{int(timeframe)}m"
+    stream = f"{normalize_symbol(symbol).lower()}@kline_{_interval_label(timeframe)}"
     uri = f"wss://fstream.binance.com/ws/{stream}"
     _seed(symbol, timeframe)
     while not _stop.is_set():
