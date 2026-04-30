@@ -34,30 +34,44 @@ def _rule_based_regime(df: pd.DataFrame) -> Dict[str, Any]:
     close = pd.to_numeric(frame["close"], errors="coerce").astype(float)
     returns = np.log(close.replace(0.0, np.nan)).diff()
     hurst = _rolling_hurst(close, 100).iloc[-1] if len(frame) >= 100 else np.nan
-    adx_df = ta.adx(frame["high"], frame["low"], frame["close"], length=14)
-    adx = _safe_float(adx_df["ADX_14"].iloc[-1] if adx_df is not None and "ADX_14" in adx_df else 0.0)
+    last = frame.iloc[-1].to_dict() if not frame.empty else {}
+    adx = _safe_float(last.get("adx"))
+    if adx <= 0:
+        adx_df = ta.adx(frame["high"], frame["low"], frame["close"], length=14)
+        adx = _safe_float(adx_df["ADX_14"].iloc[-1] if adx_df is not None and "ADX_14" in adx_df else 0.0)
+    atr_pct_z = _safe_float(last.get("atr_pct_zscore_50"))
+    supertrend_direction = int(_safe_float(last.get("supertrend_direction")))
+    open_price = _safe_float(last.get("open"))
+    high_price = _safe_float(last.get("high"))
+    low_price = _safe_float(last.get("low"))
+    bar_range_pct = ((high_price - low_price) / open_price * 100.0) if open_price else 0.0
     realized_vol = _safe_float(returns.tail(50).std(ddof=0), 0.0) * np.sqrt(365.0 * 24.0) * 100.0
     vol_history = returns.rolling(50).std(ddof=0) * np.sqrt(365.0 * 24.0) * 100.0
     vol_q33 = _safe_float(vol_history.tail(200).quantile(0.33), realized_vol)
     vol_q66 = _safe_float(vol_history.tail(200).quantile(0.66), realized_vol)
-    if adx > 30.0 and _safe_float(hurst, 0.0) > 0.55:
+
+    if adx >= 25.0 and supertrend_direction != 0 and atr_pct_z <= 1.5:
         trend_strength = "strong"
-    elif adx < 20.0 and _safe_float(hurst, 1.0) < 0.5:
+    elif adx < 20.0 and _safe_float(hurst, 1.0) < 0.5 and atr_pct_z <= 1.0:
         trend_strength = "weak"
     else:
         trend_strength = "neutral"
-    if realized_vol < vol_q33:
+
+    if atr_pct_z > 1.5 or bar_range_pct >= 8.0:
+        vol_regime = "high"
+    elif realized_vol < vol_q33:
         vol_regime = "low"
     elif realized_vol > vol_q66:
         vol_regime = "high"
     else:
         vol_regime = "normal"
-    if trend_strength == "strong" and vol_regime in {"low", "normal"}:
-        regime = "TREND"
+
+    if vol_regime == "high":
+        regime = "VOLATILE"
+    elif trend_strength == "strong":
+        regime = "TRENDING"
     elif trend_strength == "weak" and vol_regime == "low":
         regime = "RANGE"
-    elif vol_regime == "high":
-        regime = "VOLATILE"
     else:
         regime = "MIXED"
     return {
@@ -67,6 +81,9 @@ def _rule_based_regime(df: pd.DataFrame) -> Dict[str, Any]:
         "adx": adx,
         "hurst": _safe_float(hurst, 0.0),
         "realized_volatility_pct": realized_vol,
+        "atr_pct_zscore_50": atr_pct_z,
+        "bar_range_pct": bar_range_pct,
+        "supertrend_direction": supertrend_direction,
         "source": "rule",
     }
 
@@ -134,7 +151,7 @@ def _hmm_regime(df: pd.DataFrame) -> Dict[str, Any] | None:
         trend_strength = "neutral"
         vol_regime = "high"
     elif current_state == trend_state:
-        regime = "TREND"
+        regime = "TRENDING"
         trend_strength = "strong"
         vol_regime = "normal"
     else:

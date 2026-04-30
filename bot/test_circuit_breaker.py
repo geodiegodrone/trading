@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import circuit_breaker
 
@@ -17,7 +19,18 @@ CFG = {
 }
 
 
+_TMP_DIR: TemporaryDirectory[str] | None = None
+
+
+def _use_temp_state() -> None:
+    global _TMP_DIR
+    if _TMP_DIR is None:
+        _TMP_DIR = TemporaryDirectory()
+    circuit_breaker.STATE_PATH = Path(_TMP_DIR.name) / "circuit_breaker_state.json"
+
+
 def _reset() -> None:
+    _use_temp_state()
     if circuit_breaker.STATE_PATH.exists():
         circuit_breaker.STATE_PATH.unlink()
 

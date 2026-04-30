@@ -303,9 +303,9 @@ def _dashboard_volume_regime(strategy_kind, regime_name):
     strategy = str(strategy_kind or "").lower()
     regime = str(regime_name or "").upper()
     if strategy == "meanrev":
-        return "MEANREV"
+        return "VOLATILE" if regime == "VOLATILE" else "MEANREV"
     if strategy == "breakout":
-        return "VOLATILE" if regime == "VOLATILE" else "BREAKOUT"
+        return "BREAKOUT"
     if regime in {"TREND", "TRENDING"}:
         return "TRENDING"
     if regime == "RANGE":
@@ -331,20 +331,22 @@ def _dashboard_strategy_state(df, cfg):
     signal_reason = ""
     if mode == "regime":
         regime_name = str(regime_info.get("regime") or "MIXED").upper()
-        if regime_name == "TREND":
+        if regime_name in {"TREND", "TRENDING"}:
+            regime_name = "TRENDING"
             strategy_kind = "trend"
             signal = signal_trend(last, df, cfg)
         elif regime_name == "RANGE":
             strategy_kind = "meanrev"
             signal = signal_meanrev(last, df, cfg)
         elif regime_name == "VOLATILE":
-            strategy_kind = "breakout"
-            signal = signal_breakout(last, df, cfg)
+            strategy_kind = "meanrev"
+            signal_reason = "regime VOLATILE -> meanrev con riesgo reducido"
+            signal = signal_meanrev(last, df, cfg)
         else:
             regime_name = "MIXED"
-            strategy_kind = "trend"
-            signal = signal_trend(last, df, cfg)
-            signal_reason = "regime MIXED -> fallback a trend con threshold elevado"
+            strategy_kind = "breakout"
+            signal = signal_breakout(last, df, cfg)
+            signal_reason = "regime MIXED -> breakout"
     elif mode == "meanrev":
         regime_name = "RANGE"
         strategy_kind = "meanrev"
@@ -354,7 +356,7 @@ def _dashboard_strategy_state(df, cfg):
         strategy_kind = "breakout"
         signal = signal_breakout(last, df, cfg)
     else:
-        regime_name = "TREND"
+        regime_name = "TRENDING"
         strategy_kind = "trend"
         signal = signal_trend(last, df, cfg)
     volume_regime = _dashboard_volume_regime(strategy_kind, regime_name)
@@ -574,7 +576,7 @@ def _run_recovery(force_refresh: bool = True, auto: bool = False):
             try:
                 _cache[sym] = _build_symbol_payload(sym)
             except Exception:
-                pass
+                logger.exception("Failed to refresh symbol cache during recovery for %s", sym)
         health = _run_healthcheck()
         _store_health_report(health)
         report["health"] = health
@@ -697,7 +699,7 @@ def _build_symbol_payload(symbol):
         "ml_validation_trades": ml_validation_trades,
         "no_profitable_threshold": no_profitable_threshold,
         "primary_only_mode": primary_only_mode,
-        "trade_stats": stats,
+        "trade_stats": {**stats, "reconciled_count": int(stats.get("reconciled_count", stats.get("reconciled", 0) or 0))},
     }
     kpis["pnl_total"] = kpis["pnl_realized"] + kpis["pnl_unrealized"]
     indicators = {
@@ -710,9 +712,14 @@ def _build_symbol_payload(symbol):
         "volume_filter_reason": str(signal_state.get("volume_reason") or ""),
         "volume_filter_regime": str(signal_state.get("volume_regime") or "DEFAULT"),
         "atr": _as_float(last.get("atr")),
+        "atr_pct": _as_float(last.get("atr_pct")),
+        "ema9": _as_float(last.get(cols.get("ema_fast", "ema9"))),
+        "ema21": _as_float(last.get(cols.get("ema_slow", "ema21"))),
         "ema200": _as_float(last.get(cols.get("ema_trend", "ema200"))),
+        "rsi": _as_float(last.get("rsi")),
         "market_regime": signal_state.get("regime_name", "MIXED"),
         "daily_loss_pct": _daily_loss_pct(balance),
+        "daily_risk_used": _daily_loss_pct(balance),
         "kelly_fraction": _kelly_fraction(),
         "primary_only_mode": primary_only_mode,
     }
@@ -733,17 +740,61 @@ def _build_symbol_payload(symbol):
         "ema21": _as_float(last.get(cols.get("ema_slow", "ema21"))),
         "rsi": _as_float(last.get("rsi")),
         "signal": signal_state.get("signal", _signal_from_last(last, cfg)),
+        "signal_meta": {"side": signal_state.get("signal", _signal_from_last(last, cfg)), "source": signal_state.get("strategy_kind", "none")},
         "position": position,
         "candles": candles,
         "kpis": kpis,
         "indicators": indicators,
-        "trade_gate": trade_gate,
+        "trade_gate": {**trade_gate, "can_trade": bool(trade_gate.get("ready"))},
+        "ml": {
+            "ready": ml_ready,
+            "suggested_threshold": _as_float(ml_info.get("suggested_threshold"), 0.55),
+            "val_sharpe": _as_float(ml_info.get("val_sharpe")),
+            "val_auc": _as_float(ml_info.get("val_auc")),
+            "trained_on": int(ml_info.get("trained_on", 0) or 0),
+            "not_ready_reason": str(ml_info.get("not_ready_reason") or ""),
+            "no_profitable_threshold": bool(ml_info.get("no_profitable_threshold", False)),
+        },
         "circuit_breaker": cb_status,
+        "last_candle": {
+            "open": _as_float(last.get("open")),
+            "high": _as_float(last.get("high")),
+            "low": _as_float(last.get("low")),
+            "close": _as_float(last.get("close")),
+            "volume": _as_float(last.get("volume")),
+        },
         "events": events,
         "position_source": position_snapshot.get("source"),
         "position_error": position_snapshot.get("error"),
         "updated_at": updated_at.isoformat(),
         "updated_label": updated_at.strftime("%H:%M:%S UTC"),
+        "balance": kpis["balance"],
+        "balance_start": kpis["balance_start"],
+        "pnl_total": kpis["pnl_total"],
+        "pnl_realized": kpis["pnl_realized"],
+        "win_rate": kpis["win_rate"],
+        "win_rate_hint": "Rendimiento sólido" if kpis["win_rate"] >= 60 else "Rendimiento mixto" if kpis["win_rate"] >= 40 else "Rendimiento débil",
+        "trades": kpis["trade_count"],
+        "trades_sub": f"{kpis['closed_trades']} cerradas ({kpis['open_trades']} abiertas)",
+        "best_worst": f"{kpis['best_trade']:.2f}/{kpis['worst_trade']:.2f}",
+        "regime": indicators["market_regime"],
+        "adx": indicators["adx"],
+        "supertrend": "BULL" if indicators["supertrend_direction"] == 1 else "BEAR" if indicators["supertrend_direction"] == -1 else "NEUTRAL",
+        "volume_ratio": indicators["volume_ratio"],
+        "volume_quantile": indicators["volume_quantile"],
+        "volume_z": indicators["volume_z"],
+        "volume_filter_passes": indicators["volume_filter_ok"],
+        "volume_filter_reason": indicators["volume_filter_reason"],
+        "daily_risk_pct": indicators["daily_loss_pct"],
+        "daily_risk_used": indicators["daily_risk_used"],
+        "kelly_pct": indicators["kelly_fraction"] * 100.0,
+        "indicators_snapshot": {
+            "ema9": _as_float(last.get(cols.get("ema_fast", "ema9"))),
+            "ema21": _as_float(last.get(cols.get("ema_slow", "ema21"))),
+            "ema200": _as_float(last.get(cols.get("ema_trend", "ema200"))),
+            "rsi": _as_float(last.get("rsi")),
+            "atr_pct": _as_float(last.get("atr_pct")),
+        },
     }
 
 
@@ -1096,20 +1147,20 @@ async def _refresh_cache():
         try:
             _cache["portfolio"] = await asyncio.to_thread(_portfolio_payload)
         except Exception:
-            pass
+            logger.exception("Failed to refresh portfolio cache")
         try:
             _cache["agents"] = await asyncio.to_thread(_agents_payload)
         except Exception:
-            pass
+            logger.exception("Failed to refresh agents cache")
         try:
             _cache["activity"] = [evt for evt in activity_log.get_recent(50) if not _is_healthcheck_event(evt)]
         except Exception:
-            pass
+            logger.exception("Failed to refresh activity cache")
         for sym in TAB_SYMBOLS:
             try:
                 _cache[sym] = await asyncio.to_thread(_build_symbol_payload, sym)
             except Exception:
-                pass
+                logger.exception("Failed to refresh symbol cache for %s", sym)
         await asyncio.sleep(1)
 
 
@@ -1222,7 +1273,7 @@ async def ws_portfolio(websocket: WebSocket):
             await websocket.send_json(payload)
             await asyncio.sleep(1)
     except Exception:
-        pass
+        logger.exception("Portfolio websocket failed")
 
 
 @app.websocket("/ws/activity")
@@ -1235,7 +1286,7 @@ async def ws_activity(websocket: WebSocket):
             await websocket.send_json(payload)
             await asyncio.sleep(1)
     except Exception:
-        pass
+        logger.exception("Activity websocket failed")
 
 
 @app.websocket("/ws/agents")
@@ -1248,7 +1299,7 @@ async def ws_agents(websocket: WebSocket):
             await websocket.send_json(payload)
             await asyncio.sleep(2)
     except Exception:
-        pass
+        logger.exception("Agents websocket failed")
 
 
 @app.websocket("/ws/chart/{symbol}/{timeframe}")
@@ -1260,7 +1311,7 @@ async def ws_chart(websocket: WebSocket, symbol: str, timeframe: str):
             await websocket.send_json(payload)
             await asyncio.sleep(1)
     except Exception:
-        pass
+        logger.exception("Chart websocket failed for %s %s", symbol, timeframe)
 
 
 @app.websocket("/ws/{symbol}")
@@ -1273,7 +1324,7 @@ async def ws_symbol(websocket: WebSocket, symbol: str):
             await websocket.send_json(payload)
             await asyncio.sleep(1)
     except Exception:
-        pass
+        logger.exception("Symbol websocket failed for %s", symbol)
 
 
 if __name__ == "__main__":

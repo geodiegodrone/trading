@@ -707,9 +707,9 @@ def _volume_regime_name(strategy_kind, regime_name):
     strategy = str(strategy_kind or "").lower()
     regime = str(regime_name or "").upper()
     if strategy == "meanrev":
-        return "MEANREV"
+        return "VOLATILE" if regime == "VOLATILE" else "MEANREV"
     if strategy == "breakout":
-        return "VOLATILE" if regime == "VOLATILE" else "BREAKOUT"
+        return "BREAKOUT"
     if regime in {"TREND", "TRENDING"}:
         return "TRENDING"
     if regime == "RANGE":
@@ -734,9 +734,10 @@ def _loop_context_hash(ctx):
             str(ctx.get("ml_ready")),
             f"{_as_float(ctx.get('ml_confidence')):.4f}",
             f"{_as_float(ctx.get('ml_threshold_used')):.4f}",
-            str(ctx.get("circuit_breaker") or "active"),
+            str(ctx.get("circuit_breaker") or "ok"),
             str(ctx.get("decision") or "SALTAR"),
-            str(ctx.get("decision_reason") or "-"),
+            str(ctx.get("decision_reason_code") or ctx.get("decision_reason") or "-"),
+            str(ctx.get("mode") or "normal"),
         ]
     )
 
@@ -757,6 +758,48 @@ def _log_decision(symbol, ctx):
         f"→ {ctx.get('decision', 'SALTAR')} ({ctx.get('decision_reason', '-')})"
     )
     activity_log.push(symbol, "loop", message)
+    _LAST_DECISION_LOG[symbol] = {"ts": now, "hash": digest}
+
+
+def _loop_context_hash(ctx):
+    return "|".join(
+        [
+            str(ctx.get("regime") or "N/A"),
+            str(ctx.get("strategy_used") or "none"),
+            str(ctx.get("signal") or "NEUTRAL"),
+            str(ctx.get("ml_ready")),
+            f"{_as_float(ctx.get('ml_confidence')):.4f}",
+            f"{_as_float(ctx.get('ml_threshold_used')):.4f}",
+            str(ctx.get("circuit_breaker") or "ok"),
+            str(ctx.get("decision") or "SALTAR"),
+            str(ctx.get("decision_reason_code") or ctx.get("decision_reason") or "-"),
+            str(ctx.get("mode") or "normal"),
+        ]
+    )
+
+
+def _log_decision(symbol, ctx):
+    now = time.time()
+    digest = _loop_context_hash(ctx)
+    prev = _LAST_DECISION_LOG.get(symbol) or {}
+    if prev.get("hash") == digest and (now - float(prev.get("ts", 0.0))) < 300:
+        return
+    ml_ready = bool(ctx.get("ml_ready"))
+    confidence = _as_float(ctx.get("ml_confidence"), 0.0)
+    threshold = _as_float(ctx.get("ml_threshold_used"), 0.0)
+    ml_text = f"{confidence:.0%}/{threshold:.2f}{'OK' if ml_ready else 'ml_not_ready'}"
+    mode = str(ctx.get("mode") or "normal")
+    size_pct = str(ctx.get("size_pct") or "")
+    mode_text = f" mode={mode}" if mode != "normal" else ""
+    if size_pct:
+        mode_text += f" size={size_pct}"
+    reason_code = str(ctx.get("decision_reason_code") or "unspecified")
+    message = (
+        f"regime={ctx.get('regime', 'N/A')} strat={ctx.get('strategy_used', 'none')} "
+        f"signal={ctx.get('signal', 'NEUTRAL')} ml={ml_text} cb={ctx.get('circuit_breaker', 'ok')}{mode_text} "
+        f"-> {ctx.get('decision', 'SALTAR')} reason={reason_code} ({ctx.get('decision_reason', '-')})"
+    )
+    activity_log.push(symbol, "loop", message, data=dict(ctx))
     _LAST_DECISION_LOG[symbol] = {"ts": now, "hash": digest}
 
 
@@ -1160,7 +1203,7 @@ def _regime_threshold(regime_name, cfg):
 
 
 def _select_signal(symbol, primary_df, confirmation_df, cfg):
-    regime_name = "TREND"
+    regime_name = "TRENDING"
     mode = str(cfg.get("strategy_mode", "regime")).lower()
     strategy_name = mode
     meta = {"mixed_fallback": False, "reason": "", "source": mode}
@@ -1168,29 +1211,30 @@ def _select_signal(symbol, primary_df, confirmation_df, cfg):
     if mode == "regime":
         regime_info = regime_detector.classify_regime(primary_df)
         regime_name = str(regime_info.get("regime", "MIXED")).upper()
-        activity_log.push(symbol, "regime", f"Regime {regime_name} | source={regime_info.get('source')} | hurst={float(regime_info.get('hurst', 0.0)):.2f} | vol={float(regime_info.get('realized_volatility_pct', 0.0)):.2f}%")
-        if regime_name == "TREND":
+        activity_log.push(symbol, "regime", f"Regime {regime_name} | source={regime_info.get('source')} | hurst={float(regime_info.get('hurst', 0.0)):.2f} | vol={float(regime_info.get('realized_volatility_pct', 0.0)):.2f}% | atr_z={float(regime_info.get('atr_pct_zscore_50', 0.0)):.2f}")
+        if regime_name in {"TREND", "TRENDING"}:
             strategy_name = "trend"
             signal = signal_trend(last, primary_df, cfg)
         elif regime_name == "RANGE":
             strategy_name = "meanrev"
             signal = signal_meanrev(last, primary_df, cfg)
         elif regime_name == "VOLATILE":
-            strategy_name = "breakout"
-            signal = signal_breakout(last, primary_df, cfg)
+            strategy_name = "meanrev"
+            meta["reason"] = "regime VOLATILE -> meanrev con riesgo reducido"
+            signal = signal_meanrev(last, primary_df, cfg)
         else:
-            strategy_name = "trend"
+            strategy_name = "breakout"
             meta["mixed_fallback"] = True
-            meta["reason"] = "regime MIXED -> fallback a trend con threshold elevado"
-            signal = signal_trend(last, primary_df, cfg)
+            meta["reason"] = "regime MIXED -> breakout"
+            signal = signal_breakout(last, primary_df, cfg)
     elif mode == "meanrev":
         regime_name = "RANGE"
         signal = signal_meanrev(last, primary_df, cfg)
     elif mode == "breakout":
-        regime_name = "VOLATILE"
+        regime_name = "BREAKOUT"
         signal = signal_breakout(last, primary_df, cfg)
     else:
-        regime_name = "TREND"
+        regime_name = "TRENDING"
         strategy_name = "trend"
         signal = signal_trend(last, primary_df, cfg)
     if signal != "NEUTRAL" and not _htf_confirms(signal, confirmation_df, cfg):
@@ -1246,7 +1290,7 @@ def run_symbol(symbol, cfg, shared_stop_event):
             primary_df = _compute_indicators(_fetch_candles(symbol, cfg["primary_timeframe"], limit=450), cfg)
             confirmation_df = _compute_indicators(_fetch_candles(symbol, cfg["confirmation_timeframe"], limit=320), cfg)
             if primary_df.empty or confirmation_df.empty or len(primary_df) < 220 or len(confirmation_df) < 220:
-                _log_decision(symbol, {"regime": "N/A", "strategy_used": "none", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": float(cfg.get("ml_threshold", 0.55)), "circuit_breaker": "active", "decision": "SALTAR", "decision_reason": "velas insuficientes"})
+                _log_decision(symbol, {"regime": "N/A", "strategy_used": "none", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": float(cfg.get("ml_threshold", 0.55)), "circuit_breaker": "ok", "decision": "SALTAR", "decision_reason_code": "data_gap", "decision_reason": "velas insuficientes"})
                 time.sleep(60)
                 continue
             feature_frame = build_features(primary_df)
@@ -1256,24 +1300,24 @@ def run_symbol(symbol, cfg, shared_stop_event):
             position = _get_current_position(symbol)
             if position:
                 _update_position(symbol, last, signal, cfg)
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": bool(ml_model.is_ready(symbol)), "ml_confidence": 0.0, "ml_threshold_used": float(cfg.get("ml_threshold", 0.55)), "circuit_breaker": "active", "decision": "POSICION_ABIERTA", "decision_reason": "gestion de posicion en curso"})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": bool(ml_model.is_ready(symbol)), "ml_confidence": 0.0, "ml_threshold_used": float(cfg.get("ml_threshold", 0.55)), "circuit_breaker": "ok", "decision": "POSICION_ABIERTA", "decision_reason_code": "position_open", "decision_reason": "gestion de posicion en curso"})
                 time.sleep(60)
                 continue
-            cb_status_text = "active"
+            cb_status_text = "ok"
             if cfg.get("circuit_breaker_enabled", True):
                 paused, reason = circuit_breaker.is_paused()
                 if not paused:
                     paused, reason = circuit_breaker.check_circuit_breaker(balance, _as_float(daily_state.get("daily_start_balance"), balance), _as_float(weekly_state.get("weekly_start_balance"), balance), last, cfg)
                 if paused:
-                    cb_status_text = f"paused: {reason}"
+                    cb_status_text = f"PAUSED({reason})"
                     activity_log.push(symbol, "circuit_breaker", f"CB paused: {reason}")
-                    _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": float(cfg.get("ml_threshold", 0.55)), "circuit_breaker": cb_status_text, "decision": "CB_PAUSED", "decision_reason": reason})
+                    _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": float(cfg.get("ml_threshold", 0.55)), "circuit_breaker": cb_status_text, "decision": "CB_PAUSED", "decision_reason_code": "cb_paused", "decision_reason": reason})
                     time.sleep(60)
                     continue
             features = {**feature_context}
             features["side_buy"] = 1.0 if signal == "LONG" else 0.0
             features["supertrend_aligned_side"] = 1.0 if ((features["side_buy"] >= 0.5 and _as_float(features.get("supertrend_direction")) > 0) or (features["side_buy"] < 0.5 and _as_float(features.get("supertrend_direction")) < 0)) else 0.0
-            features["regime_code"] = {"TREND": 1.0, "RANGE": -1.0, "VOLATILE": 2.0, "MIXED": 0.0}.get(regime_name, 0.0)
+            features["regime_code"] = {"TREND": 1.0, "TRENDING": 1.0, "RANGE": -1.0, "VOLATILE": 2.0, "MIXED": 0.0, "BREAKOUT": 0.5}.get(regime_name, 0.0)
             confidence = _ml_confidence(features, symbol)
             ml_threshold = float(cfg.get("ml_threshold", 0.55))
             ml_ready = False
@@ -1302,7 +1346,7 @@ def run_symbol(symbol, cfg, shared_stop_event):
             state = _calc_portfolio_risk(balance, state)
             _save_portfolio_state(state)
             if signal == "NEUTRAL":
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "SALTAR", "decision_reason": signal_meta.get("reason") or "sin se?al v?lida"})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "SALTAR", "decision_reason_code": "primary_neutral", "decision_reason": signal_meta.get("reason") or "sin señal válida"})
                 time.sleep(60)
                 continue
             volume_regime = _volume_regime_name(strategy_kind, regime_name)
@@ -1310,11 +1354,11 @@ def run_symbol(symbol, cfg, shared_stop_event):
             volume_cfg["_signal_side"] = signal
             volume_ok, volume_reason = volume_filter_passes(primary_df, volume_regime, volume_cfg)
             if not volume_ok:
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason": volume_reason})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason_code": "volume_filter", "decision_reason": volume_reason})
                 time.sleep(60)
                 continue
             if confidence < ml_threshold and ml_ready:
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason": f"meta-modelo {confidence:.0%} < {ml_threshold:.2f}"})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason_code": "ml_threshold", "decision_reason": f"meta-modelo {confidence:.0%} < {ml_threshold:.2f}"})
                 time.sleep(60)
                 continue
             price = _as_float(last.get("close"))
@@ -1326,13 +1370,16 @@ def run_symbol(symbol, cfg, shared_stop_event):
             else:
                 atr_stop_distance = atr * float(cfg.get("atr_mult", 1.5))
             trade_usdt = _kelly_trade_usdt(balance, price, atr_stop_distance, cfg["leverage"])
+            if regime_name == "VOLATILE" and strategy_kind == "meanrev":
+                trade_usdt *= 0.5
             trade_usdt = _primary_only_trade_usdt(trade_usdt, ml_ready)
+            size_pct = "25%" if (primary_only_mode and regime_name == "VOLATILE" and strategy_kind == "meanrev") else ("50%" if primary_only_mode else "100%")
             qty_preview = binance_broker.normalize_quantity(symbol, (trade_usdt * cfg["leverage"]) / price) if price > 0 else 0.0
             risk_pct = (qty_preview * atr_stop_distance) / balance * 100 if balance > 0 else 0.0
             projected = state.get("total_risk_pct", 0.0) + risk_pct
             if projected > float(cfg.get("daily_risk_cap", 5.0)):
                 activity_log.push("PORTFOLIO", "risk", "Limite de riesgo del portafolio alcanzado - nueva posicion bloqueada")
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason": f"riesgo proyectado {projected:.2f}% > cap {float(cfg.get('daily_risk_cap', 5.0)):.2f}%"})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason_code": "daily_risk_cap", "decision_reason": f"riesgo proyectado {projected:.2f}% > cap {float(cfg.get('daily_risk_cap', 5.0)):.2f}%"})
                 time.sleep(60)
                 continue
             if primary_only_mode:
@@ -1340,14 +1387,14 @@ def run_symbol(symbol, cfg, shared_stop_event):
             _open_trade(symbol, signal, last, primary_df, cfg, balance, trade_usdt, strategy_kind=strategy_kind, regime_name=regime_name)
             open_reason = signal_meta.get("reason") or "se?al confirmada"
             if primary_only_mode:
-                open_reason = f"{open_reason} | PRIMARY ONLY 50% size"
+                open_reason = f"{open_reason} | PRIMARY ONLY {size_pct} size"
             else:
                 open_reason = f"{open_reason} | {volume_reason}"
-            _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "ABRIR", "decision_reason": open_reason})
+            _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "ABRIR", "decision_reason_code": "open", "decision_reason": open_reason, "mode": "primary_only" if primary_only_mode else "normal", "size_pct": size_pct if primary_only_mode else "100%"})
         except Exception as exc:
             logger.exception("Symbol loop error for %s", symbol)
             activity_log.push(symbol, "error", f"Error: {exc}")
-            _log_decision(symbol, {"regime": "N/A", "strategy_used": "none", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": float(cfg.get("ml_threshold", 0.55)), "circuit_breaker": "active", "decision": "SALTAR", "decision_reason": f"error: {exc}"})
+            _log_decision(symbol, {"regime": "N/A", "strategy_used": "none", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": float(cfg.get("ml_threshold", 0.55)), "circuit_breaker": "ok", "decision": "SALTAR", "decision_reason_code": "error", "decision_reason": f"error: {exc}"})
         time.sleep(60)
 
 

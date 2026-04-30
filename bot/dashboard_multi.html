@@ -2054,6 +2054,7 @@
       portfolio: null,
       agents: null,
       mlInfo: null,
+      loopReasons: {},
       symbols: Object.fromEntries(SYMBOLS.map((s) => [s, { snapshot: null, chart: null, chartTimeframe: '1d', chartSnapshot: null }]))
     };
 
@@ -2071,6 +2072,16 @@
 
     function id(symbol, name) {
       return `${name}-${symbol}`;
+    }
+
+    function setText(symbol, name, value) {
+      const el = document.getElementById(id(symbol, name));
+      if (el) el.textContent = value;
+    }
+
+    function safeWsUrl(path) {
+      const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+      return `${scheme}://${location.host}${path}`;
     }
 
     function labelWithInfo(label, title) {
@@ -2095,6 +2106,11 @@
       const n = Number(value);
       const sign = n > 0 ? '+' : '';
       return `${sign}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    }
+
+    function formatCompact(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return '--';
+      return Number(value).toLocaleString('en-US', { notation: 'compact', maximumFractionDigits: 1 });
     }
 
     function buildTabs() {
@@ -2160,6 +2176,7 @@
                 <div class="kpi-value" id="${id(symbol,'kpiMlStatus')}">--</div>
                 <div class="kpi-sub" id="${id(symbol,'kpiMlHint')}">--</div>
                 <div class="kpi-sub" id="${id(symbol,'kpiMlMeta')}">--</div>
+                <div class="kpi-sub" id="${id(symbol,'kpiMlReasons')}">--</div>
                 <button type="button" class="pill action" id="${id(symbol,'mlRetrainBtn')}" style="width:max-content; margin-top:10px;">Reentrenar ahora</button>
               </div>
               <div class="kpi-card">
@@ -2793,12 +2810,13 @@
     }
 
     function setSignal(symbol, signal) {
-      const el = document.getElementById(id(symbol, 'signalBadge'));
-      if (!el) return;
-      const s = (signal || 'NEUTRAL').toUpperCase();
-      el.textContent = s;
-      el.className = `badge ${s.toLowerCase()}`;
-    }
+        const el = document.getElementById(id(symbol, 'signalBadge'));
+        if (!el) return;
+        const raw = typeof signal === 'object' ? (signal?.side || signal?.value || 'NEUTRAL') : (signal || 'NEUTRAL');
+        const s = String(raw).toUpperCase();
+        el.textContent = s;
+        el.className = `badge ${s.toLowerCase()}`;
+      }
 
     function setPosition(symbol, position) {
       const sideEl = document.getElementById(id(symbol, 'posSide'));
@@ -2858,55 +2876,60 @@
       const primaryOnly = Boolean(kpis?.primary_only_mode);
       const notReadyReason = String(mlInfo?.not_ready_reason || '');
 
-      setText('kpiBalance', formatMoney(balance));
-      setText('kpiBalanceHint', `(${formatMoney(balance - balanceStart)}) vs ${formatCompact(balanceStart)} start`);
-      setText('kpiPnlTotal', formatMoney(pnlTotal));
+      setText(symbol, 'kpiBalance', formatMoney(balance));
+      setText(symbol, 'kpiBalanceDelta', `(${formatMoney(balance - balanceStart)}) vs ${formatCompact(balanceStart)} start`);
+      setText(symbol, 'kpiPnlTotal', formatMoney(pnlTotal));
       document.getElementById(id(symbol, 'kpiPnlTotal')).style.color = pnlTotal >= 0 ? 'var(--green)' : 'var(--red)';
-      setText('kpiPnlRealized', formatMoney(pnlRealized));
+      setText(symbol, 'kpiPnlRealized', formatMoney(pnlRealized));
       document.getElementById(id(symbol, 'kpiPnlRealized')).style.color = pnlRealized >= 0 ? 'var(--green)' : 'var(--red)';
-      setText('kpiWinRate', `${Number.isFinite(winRate) ? winRate.toFixed(1) : '0.0'}%`);
+      setText(symbol, 'kpiWinRate', `${Number.isFinite(winRate) ? winRate.toFixed(1) : '0.0'}%`);
       document.getElementById(id(symbol, 'kpiWinRate')).style.color = winRate >= 60 ? 'var(--green)' : winRate >= 40 ? 'var(--yellow)' : 'var(--red)';
-      setText('kpiWinRateHint', winRate >= 60 ? 'Rendimiento s?lido' : winRate >= 40 ? 'Rendimiento mixto' : 'Rendimiento d?bil');
+      setText(symbol, 'kpiWinRateHint', winRate >= 60 ? 'Rendimiento sólido' : winRate >= 40 ? 'Rendimiento mixto' : 'Rendimiento débil');
       const hasClosedTrades = closedTrades > 0 || statsTotal > 0;
-      setText('kpiTrades', `${closedTrades.toLocaleString('en-US')} cerradas (${openTrades} abiertas)`);
-      setText('kpiTradesSub', hasClosedTrades ? `${statsWins}W ${statsLosses}L` : 'Sin trades cerrados todav?a');
-      setText('kpiBestWorst', hasClosedTrades ? `${formatMoney(bestTrade)} / ${formatMoney(worstTrade)}` : '-- / --');
+      setText(symbol, 'kpiTrades', `${closedTrades.toLocaleString('en-US')} cerradas (${openTrades} abiertas)`);
+      setText(symbol, 'kpiTradesSub', hasClosedTrades ? `${statsWins}W ${statsLosses}L` : 'Sin trades cerrados todavía');
+      setText(symbol, 'kpiBestWorst', hasClosedTrades ? `${formatMoney(bestTrade)} / ${formatMoney(worstTrade)}` : '-- / --');
 
       const mlStatusEl = document.getElementById(id(symbol, 'kpiMlStatus'));
       const mlHintEl = document.getElementById(id(symbol, 'kpiMlHint'));
       const mlMetaEl = document.getElementById(id(symbol, 'kpiMlMeta'));
       if (retraining) {
-        setText('kpiMlStatus', '? Reentrenando...');
+          setText(symbol, 'kpiMlStatus', '⏳ Reentrenando...');
         if (mlStatusEl) mlStatusEl.style.color = 'var(--yellow)';
       } else if (mlReady || mlInfo?.ready) {
-        setText('kpiMlStatus', `READY (${Number(mlInfo?.suggested_threshold ?? mlConfidence).toFixed(2)})`);
+          setText(symbol, 'kpiMlStatus', `READY (${Number(mlInfo?.suggested_threshold ?? mlConfidence).toFixed(2)})`);
         if (mlStatusEl) mlStatusEl.style.color = 'var(--green)';
       } else if (noProfitable) {
-        setText('kpiMlStatus', 'MODELO NO RENTABLE');
+          setText(symbol, 'kpiMlStatus', 'MODELO NO RENTABLE');
         if (mlStatusEl) mlStatusEl.style.color = 'var(--red)';
       } else if (Number(mlInfo?.trained_on ?? mlTrainingTrades) >= mlMinTrainTrades) {
-        setText('kpiMlStatus', 'NO LISTO');
+          setText(symbol, 'kpiMlStatus', 'NO LISTO');
         if (mlStatusEl) mlStatusEl.style.color = 'var(--yellow)';
       } else {
-        setText('kpiMlStatus', `Training (${Math.min(Number(mlInfo?.trained_on ?? mlTrainingTrades), mlMinTrainTrades)}/${mlMinTrainTrades} trades)`);
+          setText(symbol, 'kpiMlStatus', `Training (${Math.min(Number(mlInfo?.trained_on ?? mlTrainingTrades), mlMinTrainTrades)}/${mlMinTrainTrades} trades)`);
         if (mlStatusEl) mlStatusEl.style.color = 'var(--yellow)';
       }
       if (mlHintEl) {
         const modeTag = primaryOnly ? ' | PRIMARY ONLY (50% size)' : '';
         mlHintEl.textContent = `trained_on=${Number(mlInfo?.trained_on ?? mlTrainingTrades)} | sharpe=${Number(mlInfo?.val_sharpe ?? 0).toFixed(2)} | thr=${Number(mlInfo?.suggested_threshold ?? mlConfidence).toFixed(2)}${modeTag}${notReadyReason ? ` | ${notReadyReason}` : ''}`;
       }
-      if (mlMetaEl) {
-        const extra = noProfitable ? ' | MODELO NO RENTABLE - PRIMARY ONLY' : primaryOnly ? ' | MODO PRIMARY' : '';
-        mlMetaEl.textContent = `ready=${Boolean(mlInfo?.ready)} | last=${mlInfo?.last_trained_at || '--'} | closed_real=${Number(mlInfo?.n_trades_real_closed ?? mlValidationTrades)}${extra}`;
-      }
-      const mlBtn = document.getElementById(id(symbol, 'mlRetrainBtn'));
+        if (mlMetaEl) {
+          const extra = noProfitable ? ' | MODELO NO RENTABLE - PRIMARY ONLY' : primaryOnly ? ' | MODO PRIMARY' : '';
+          mlMetaEl.textContent = `ready=${Boolean(mlInfo?.ready)} | last=${mlInfo?.last_trained_at || '--'} | closed_real=${Number(mlInfo?.n_trades_real_closed ?? mlValidationTrades)}${extra}`;
+        }
+        const mlReasonsEl = document.getElementById(id(symbol, 'kpiMlReasons'));
+        if (mlReasonsEl) {
+          const reasons = Array.isArray(state.loopReasons?.[symbol]) ? state.loopReasons[symbol] : [];
+          mlReasonsEl.textContent = reasons.length ? `POR QUÉ NO OPERÓ: ${reasons.join(' | ')}` : 'POR QUÉ NO OPERÓ: esperando motivos del loop...';
+        }
+        const mlBtn = document.getElementById(id(symbol, 'mlRetrainBtn'));
       if (mlBtn) {
         mlBtn.disabled = retraining;
         mlBtn.textContent = retraining ? '? Reentrenando...' : 'Reentrenar ahora';
       }
-      setText('kpiStats', hasClosedTrades ? `${statsWinRate.toFixed(1)}%` : '--');
+      setText(symbol, 'kpiStats', hasClosedTrades ? `${statsWinRate.toFixed(1)}%` : '--');
       document.getElementById(id(symbol, 'kpiStats')).style.color = statsWinRate >= 60 ? 'var(--green)' : statsWinRate >= 40 ? 'var(--yellow)' : 'var(--red)';
-      setText('kpiStatsHint', hasClosedTrades ? `${statsTotal} reales (${reconciledCount} reconcil.) | ${statsWins}W ${statsLosses}L | R ${statsAvgR.toFixed(2)} / ${statsBestR.toFixed(2)} / ${statsWorstR.toFixed(2)}` : 'Sin historial cerrado todav?a');
+      setText(symbol, 'kpiStatsHint', hasClosedTrades ? `${statsTotal} reales (${reconciledCount} reconcil.) | ${statsWins}W ${statsLosses}L | R ${statsAvgR.toFixed(2)} / ${statsBestR.toFixed(2)} / ${statsWorstR.toFixed(2)}` : 'Sin historial cerrado todavía');
 
       const pnlUnrealizedText = formatMoney(pnlUnrealized);
       const tradesSub = document.getElementById(id(symbol, 'kpiTradesSub'));
@@ -3154,7 +3177,31 @@
         const res = await fetch('/api/loop/status', { method: 'GET' });
         if (!res.ok) return;
         const payload = await res.json();
-        if (Array.isArray(payload) && payload.length) updateActivity(payload);
+        state.loopReasons = {};
+        if (Array.isArray(payload) && payload.length) {
+          updateActivity(payload);
+          const reasonsBySymbol = {};
+          payload
+            .filter((entry) => String(entry?.type || '').toLowerCase() === 'loop')
+            .slice(-10)
+            .forEach((entry) => {
+              const symbol = String(entry?.symbol || 'BTCUSDT').toUpperCase();
+              const data = entry?.data || {};
+              const reason = String(data?.decision_reason_code || '').trim();
+              if (!reason) return;
+              const bucket = reasonsBySymbol[symbol] || {};
+              bucket[reason] = (bucket[reason] || 0) + 1;
+              reasonsBySymbol[symbol] = bucket;
+            });
+          state.loopReasons = Object.fromEntries(Object.entries(reasonsBySymbol).map(([symbol, counts]) => [
+            symbol,
+            Object.entries(counts).map(([reason, count]) => `${reason}: ${count}`),
+          ]));
+          SYMBOLS.forEach((symbol) => {
+            const snapshot = state.symbols[symbol]?.snapshot;
+            if (snapshot?.kpis) setKpis(symbol, snapshot.kpis);
+          });
+        }
       } catch (err) {
         console.error(err);
       }
@@ -3378,6 +3425,7 @@
       if (d?.events) updateActivity(d.events);
       const updatedEl = document.getElementById(`updated-${symbol}`);
       if (updatedEl) updatedEl.textContent = d?.updated_label || '--';
+      setMarketSnapshot(symbol, d || {});
       setSignal(symbol, d.signal);
       setPosition(symbol, d.position);
       setKpis(symbol, d.kpis || {});
@@ -3522,19 +3570,19 @@
       if (prev) {
         try { prev.onclose = null; prev.close(); } catch (err) { console.error(err); }
       }
-      chartSockets[symbol] = connectWS(`ws://localhost:8000/ws/chart/${symbol}/${tf}`, (payload) => updateChartPayload(symbol, payload));
+      chartSockets[symbol] = connectWS(safeWsUrl(`/ws/chart/${symbol}/${tf}`), (payload) => updateChartPayload(symbol, payload));
     }
 
     buildTabs();
     buildSymbolPanels();
     const healthBtn = document.getElementById('healthCheckBtn');
     if (healthBtn) healthBtn.addEventListener('click', runHealthCheck);
-    connectWS('ws://localhost:8000/ws/portfolio', renderPortfolio);
-    connectWS('ws://localhost:8000/ws/agents', renderAgents);
-    SYMBOLS.forEach((symbol) => connectWS(`ws://localhost:8000/ws/${symbol}`, (d) => updateSymbol(symbol, d)));
+    connectWS(safeWsUrl('/ws/portfolio'), renderPortfolio);
+    connectWS(safeWsUrl('/ws/agents'), renderAgents);
+    SYMBOLS.forEach((symbol) => connectWS(safeWsUrl(`/ws/${symbol}`), (d) => updateSymbol(symbol, d)));
     SYMBOLS.forEach((symbol) => connectChartStream(symbol, state.symbols[symbol]?.chartTimeframe || '1d'));
     SYMBOLS.forEach((symbol) => renderActivity(shortSymbol(symbol)));
-    connectWS('ws://localhost:8000/ws/activity', updateActivity);
+    connectWS(safeWsUrl('/ws/activity'), updateActivity);
     window.addEventListener('resize', () => SYMBOLS.forEach((symbol) => resizeChart(symbol)));
     switchTab('portfolio');
     loadLatestHealthCheck();

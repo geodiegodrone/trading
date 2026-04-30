@@ -23,16 +23,20 @@ def _frame(volatility: float = 0.2, trend: float = 0.0, spike: float = 0.0) -> p
 
 def test_trend_regime() -> None:
     df = _frame(volatility=0.05, trend=0.35)
-    fake_adx = pd.DataFrame({"ADX_14": [35.0] * len(df)})
-    with patch("regime.ta.adx", return_value=fake_adx), patch("regime._rolling_hurst", return_value=pd.Series([0.60] * len(df), index=df.index)):
+    df["adx"] = 35.0
+    df["atr_pct_zscore_50"] = 0.5
+    df["supertrend_direction"] = 1.0
+    with patch("regime._rolling_hurst", return_value=pd.Series([0.60] * len(df), index=df.index)):
         result = regime.classify_regime(df)
-    assert result["regime"] == "TREND", result
+    assert result["regime"] == "TRENDING", result
 
 
 def test_volatile_regime() -> None:
     df = _frame(volatility=0.05, trend=0.0, spike=12.0)
-    fake_adx = pd.DataFrame({"ADX_14": [18.0] * len(df)})
-    with patch("regime.ta.adx", return_value=fake_adx), patch("regime._rolling_hurst", return_value=pd.Series([0.48] * len(df), index=df.index)):
+    df["adx"] = 18.0
+    df["atr_pct_zscore_50"] = 1.8
+    df["supertrend_direction"] = -1.0
+    with patch("regime._rolling_hurst", return_value=pd.Series([0.48] * len(df), index=df.index)):
         result = regime.classify_regime(df)
     assert result["regime"] == "VOLATILE", result
 
