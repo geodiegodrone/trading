@@ -15,6 +15,49 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _volume_stats(df: pd.DataFrame) -> tuple[float, float, float]:
+    if df.empty or "volume" not in df:
+        return 0.0, 0.0, 0.0
+    volume = pd.to_numeric(df["volume"], errors="coerce").astype(float)
+    window = volume.tail(50)
+    if window.empty:
+        return 0.0, 0.0, 0.0
+    current = _safe_float(window.iloc[-1])
+    mean = _safe_float(window.mean())
+    std = _safe_float(window.std(ddof=0))
+    zscore = (current - mean) / std if std > 0 else 0.0
+    quantile = float((window <= current).mean()) if len(window) else 0.0
+    ratio = current / mean if mean > 0 else 0.0
+    return zscore, quantile, ratio
+
+
+def volume_filter_passes(df: pd.DataFrame, regime: str, cfg: Dict[str, Any]) -> tuple[bool, str]:
+    if df.empty:
+        return False, "sin velas para filtro de volumen"
+    zscore, quantile, ratio = _volume_stats(df)
+    regime_name = str(regime or "DEFAULT").upper()
+    if regime_name in {"TREND", "TRENDING"}:
+        passed = quantile >= 0.30 or zscore >= -0.5
+        reason = f"vol q={quantile:.2f} {'ok' if passed else '< 0.30'} (TRENDING), z={zscore:.2f}"
+        return passed, reason
+    if regime_name == "BREAKOUT":
+        passed = quantile >= 0.65 and zscore >= 0.8
+        reason = f"vol q={quantile:.2f} / z={zscore:.2f} {'ok' if passed else 'bloquea'} (BREAKOUT)"
+        return passed, reason
+    if regime_name in {"RANGE", "MEANREV"}:
+        passed = quantile <= 0.40
+        reason = f"vol q={quantile:.2f} {'ok' if passed else '> 0.40'} (MEANREV)"
+        return passed, reason
+    if regime_name == "VOLATILE":
+        passed = zscore >= 1.0
+        reason = f"vol z={zscore:.2f} {'ok' if passed else '< 1.00'} (VOLATILE)"
+        return passed, reason
+    volume_mult = float(cfg.get("volume_mult", 1.2))
+    passed = ratio >= volume_mult
+    reason = f"vol ratio={ratio:.2f} {'ok' if passed else f'< {volume_mult:.2f}'} (LEGACY)"
+    return passed, reason
+
+
 def _feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -43,18 +86,14 @@ def signal_trend(last: Dict[str, Any], df: pd.DataFrame, cfg: Dict[str, Any]) ->
     close = _safe_float(last.get("close"))
     rsi = _safe_float(last.get("rsi"))
     adx = _safe_float(last.get("adx"))
-    volume = _safe_float(last.get("volume"))
-    vol_ma20 = _safe_float(last.get("vol_ma20"))
     supertrend_dir = int(_safe_float(last.get(cols.get("supertrend_dir", "supertrend_direction"))))
     primary_tf = int(cfg.get("primary_timeframe", cfg.get("timeframe", 60)))
     adx_threshold = float(cfg.get("adx_threshold_1h", 18)) if primary_tf >= 60 else float(cfg.get("adx_threshold", 25))
-    volume_mult = float(cfg.get("volume_mult_1h", 1.0)) if primary_tf >= 60 else float(cfg.get("volume_mult", 1.2))
     long_ok = (
         ema_fast > ema_slow
         and close > ema_trend
         and supertrend_dir == 1
         and adx > adx_threshold
-        and volume > (vol_ma20 * volume_mult if vol_ma20 else 0.0)
         and float(cfg.get("rsi_min", 30)) < rsi < float(cfg.get("rsi_max", 70))
     )
     short_ok = (
@@ -62,7 +101,6 @@ def signal_trend(last: Dict[str, Any], df: pd.DataFrame, cfg: Dict[str, Any]) ->
         and close < ema_trend
         and supertrend_dir == -1
         and adx > adx_threshold
-        and volume > (vol_ma20 * volume_mult if vol_ma20 else 0.0)
         and float(cfg.get("rsi_min", 30)) < rsi < float(cfg.get("rsi_max", 70))
     )
     if long_ok:
@@ -102,16 +140,13 @@ def signal_breakout(last: Dict[str, Any], df: pd.DataFrame, cfg: Dict[str, Any])
     ranges = (frame["high"] - frame["low"]).tail(7)
     if len(ranges) < 7 or ranges.iloc[-1] != ranges.min():
         return "NEUTRAL"
-    volume = _safe_float(row.get("volume"))
-    vol_ma20 = _safe_float(frame["volume"].rolling(20).mean().iloc[-1])
     atr_z = _safe_float(row.get("atr_pct_zscore_50"))
     donchian_high = _safe_float(frame["high"].rolling(20).max().shift(1).iloc[-1])
     donchian_low = _safe_float(frame["low"].rolling(20).min().shift(1).iloc[-1])
     close = _safe_float(row.get("close"))
-    volume_ok = volume > vol_ma20 * 1.5 if vol_ma20 > 0 else False
-    if close > donchian_high and volume_ok and atr_z > 0.5:
+    if close > donchian_high and atr_z > 0.5:
         return "LONG"
-    if close < donchian_low and volume_ok and atr_z > 0.5:
+    if close < donchian_low and atr_z > 0.5:
         return "SHORT"
     return "NEUTRAL"
 

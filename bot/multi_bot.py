@@ -18,7 +18,7 @@ from bot_config import DEFAULT_CONFIG, get_symbol_config, parse_symbols
 from features import FEATURE_COLUMNS, build_features
 import ml_model
 import regime as regime_detector
-from strategies import enrich_indicators, signal_breakout, signal_meanrev, signal_trend
+from strategies import enrich_indicators, signal_breakout, signal_meanrev, signal_trend, volume_filter_passes
 import trade_log
 
 ROOT = Path(__file__).resolve().parent
@@ -89,7 +89,7 @@ def _get_symbol_config(symbol):
     cfg["rsi_min"] = float(cfg.get("rsi_min", 30))
     cfg["rsi_max"] = float(cfg.get("rsi_max", 70))
     cfg["ml_threshold"] = float(cfg.get("ml_threshold", 0.55))
-    cfg["ml_auto_bootstrap_days"] = int(cfg.get("ml_auto_bootstrap_days", 120))
+    cfg["ml_auto_bootstrap_days"] = int(cfg.get("ml_auto_bootstrap_days", 365))
     cfg["ml_watchdog_hours"] = float(cfg.get("ml_watchdog_hours", 24.0))
     cfg["ml_force_bootstrap_after_failures"] = int(cfg.get("ml_force_bootstrap_after_failures", 3))
     cfg["daily_risk_cap"] = float(cfg.get("daily_risk_cap", 5.0))
@@ -703,6 +703,28 @@ def _ml_confidence(features, symbol):
     return 0.5
 
 
+def _volume_regime_name(strategy_kind, regime_name):
+    strategy = str(strategy_kind or "").lower()
+    regime = str(regime_name or "").upper()
+    if strategy == "meanrev":
+        return "MEANREV"
+    if strategy == "breakout":
+        return "VOLATILE" if regime == "VOLATILE" else "BREAKOUT"
+    if regime in {"TREND", "TRENDING"}:
+        return "TRENDING"
+    if regime == "RANGE":
+        return "MEANREV"
+    return regime or "DEFAULT"
+
+
+def _primary_only_active(ml_ready, ml_info):
+    return not bool(ml_ready)
+
+
+def _primary_only_trade_usdt(trade_usdt, ml_ready):
+    return float(trade_usdt) * 0.5 if not bool(ml_ready) else float(trade_usdt)
+
+
 def _loop_context_hash(ctx):
     return "|".join(
         [
@@ -783,9 +805,10 @@ def _ensure_ml_bootstrapped(symbol, cfg, force=False, reason_override=None):
             activity_log.push(symbol, "ml", f"⚙️ Auto-bootstrap iniciado (motivo: {'; '.join(reasons)})")
             result = bootstrap_ml.bootstrap(
                 symbol="BTCUSDT",
-                days=int(cfg.get("ml_auto_bootstrap_days", 120)),
+                days=int(cfg.get("ml_auto_bootstrap_days", 365)),
                 timeframe=int(cfg.get("primary_timeframe", 60)),
                 trade_usdt=50,
+                min_samples=150,
                 quiet=True,
             )
             trained_on = int(result.get("labels") or ml_model.model_info(symbol).get("trained_on", 0))
@@ -1274,11 +1297,20 @@ def run_symbol(symbol, cfg, shared_stop_event):
                     _ML_NOT_READY_STATE[symbol] = not_ready_reason
             if ml_ready:
                 _ML_NOT_READY_STATE.pop(symbol, None)
+            primary_only_mode = _primary_only_active(ml_ready, ml_info)
             state = _portfolio_state()
             state = _calc_portfolio_risk(balance, state)
             _save_portfolio_state(state)
             if signal == "NEUTRAL":
                 _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "SALTAR", "decision_reason": signal_meta.get("reason") or "sin se?al v?lida"})
+                time.sleep(60)
+                continue
+            volume_regime = _volume_regime_name(strategy_kind, regime_name)
+            volume_cfg = dict(cfg)
+            volume_cfg["_signal_side"] = signal
+            volume_ok, volume_reason = volume_filter_passes(primary_df, volume_regime, volume_cfg)
+            if not volume_ok:
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason": volume_reason})
                 time.sleep(60)
                 continue
             if confidence < ml_threshold and ml_ready:
@@ -1294,6 +1326,7 @@ def run_symbol(symbol, cfg, shared_stop_event):
             else:
                 atr_stop_distance = atr * float(cfg.get("atr_mult", 1.5))
             trade_usdt = _kelly_trade_usdt(balance, price, atr_stop_distance, cfg["leverage"])
+            trade_usdt = _primary_only_trade_usdt(trade_usdt, ml_ready)
             qty_preview = binance_broker.normalize_quantity(symbol, (trade_usdt * cfg["leverage"]) / price) if price > 0 else 0.0
             risk_pct = (qty_preview * atr_stop_distance) / balance * 100 if balance > 0 else 0.0
             projected = state.get("total_risk_pct", 0.0) + risk_pct
@@ -1302,8 +1335,15 @@ def run_symbol(symbol, cfg, shared_stop_event):
                 _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason": f"riesgo proyectado {projected:.2f}% > cap {float(cfg.get('daily_risk_cap', 5.0)):.2f}%"})
                 time.sleep(60)
                 continue
+            if primary_only_mode:
+                activity_log.push(symbol, "ml", f"[ML-OFF] operating primary signal at 50% size, reason={ml_info.get('not_ready_reason') or 'modelo no listo'}")
             _open_trade(symbol, signal, last, primary_df, cfg, balance, trade_usdt, strategy_kind=strategy_kind, regime_name=regime_name)
-            _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "ABRIR", "decision_reason": signal_meta.get("reason") or "se?al confirmada"})
+            open_reason = signal_meta.get("reason") or "se?al confirmada"
+            if primary_only_mode:
+                open_reason = f"{open_reason} | PRIMARY ONLY 50% size"
+            else:
+                open_reason = f"{open_reason} | {volume_reason}"
+            _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "ABRIR", "decision_reason": open_reason})
         except Exception as exc:
             logger.exception("Symbol loop error for %s", symbol)
             activity_log.push(symbol, "error", f"Error: {exc}")

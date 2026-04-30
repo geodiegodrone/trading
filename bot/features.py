@@ -64,6 +64,8 @@ FEATURE_COLUMNS = [
     "dayofweek_cos",
     "regime_code",
     "side_buy",
+    "volume_z",
+    "volume_quantile",
 ]
 
 
@@ -118,6 +120,21 @@ def _hurst_exponent(values: np.ndarray) -> float:
 
 def _rolling_hurst(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window).apply(_hurst_exponent, raw=True)
+
+
+def _rolling_percentile(series: pd.Series, window: int) -> pd.Series:
+    def _percentile(values: np.ndarray) -> float:
+        if len(values) < 2:
+            return np.nan
+        current = values[-1]
+        if np.isnan(current):
+            return np.nan
+        clean = values[np.isfinite(values)]
+        if len(clean) == 0:
+            return np.nan
+        return float(np.mean(clean <= current))
+
+    return series.rolling(window).apply(_percentile, raw=True)
 
 
 def _volume_profile_features(
@@ -290,6 +307,8 @@ def build_features(df: pd.DataFrame, history_lookback: int = 50) -> pd.DataFrame
     features["volume_zscore_50"] = _rolling_zscore(volume, history_lookback)
     features["obv_slope_10"] = obv_slope
     features["volume_trend_3_ratio"] = volume.rolling(3).mean() / volume.rolling(20).mean().replace(0.0, np.nan)
+    features["volume_z"] = features["volume_zscore_50"]
+    features["volume_quantile"] = _rolling_percentile(volume, history_lookback)
     features["cvd_20_zscore"] = _rolling_zscore(cvd_roll, 100)
     features["taker_buy_ratio"] = taker_quote / quote_vol.replace(0.0, np.nan)
     features["price_vs_poc_pct"] = ((close - poc_100) / poc_100.replace(0.0, np.nan)) * 100.0

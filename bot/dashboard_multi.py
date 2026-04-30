@@ -19,6 +19,8 @@ import market_stream
 from bot_config import get_symbol_config, parse_symbols
 from features import build_features
 import ml_model
+import regime as regime_detector
+from strategies import signal_breakout, signal_meanrev, signal_trend, volume_filter_passes
 import trade_log
 
 ROOT = Path(__file__).resolve().parent
@@ -273,11 +275,9 @@ def _signal_from_last(last, cfg=None):
     rsi = _as_float(last.get("rsi"))
     adx = _as_float(last.get("adx"))
     st = int(_as_float(last.get("supertrend_direction")))
-    vol = _as_float(last.get("volume"))
-    vol_ma = _as_float(last.get("vol_ma20"))
     close = _as_float(last.get("close"))
-    adx_threshold = float(cfg.get("adx_threshold", 25))
-    volume_mult = float(cfg.get("volume_mult", 1.2))
+    primary_tf = int(cfg.get("primary_timeframe", cfg.get("timeframe", 60)))
+    adx_threshold = float(cfg.get("adx_threshold_1h", 18)) if primary_tf >= 60 else float(cfg.get("adx_threshold", 25))
     rsi_min = float(cfg.get("rsi_min", 30))
     rsi_max = float(cfg.get("rsi_max", 70))
     if (
@@ -285,7 +285,6 @@ def _signal_from_last(last, cfg=None):
         and close > ema_trend
         and st == 1
         and adx > adx_threshold
-        and vol > vol_ma * volume_mult
         and rsi_min < rsi < rsi_max
     ):
         return "LONG"
@@ -294,71 +293,103 @@ def _signal_from_last(last, cfg=None):
         and close < ema_trend
         and st == -1
         and adx > adx_threshold
-        and vol > vol_ma * volume_mult
         and rsi_min < rsi < rsi_max
     ):
         return "SHORT"
     return "NEUTRAL"
 
 
-def _trade_gate_state(last, cfg, position=None, ml_ready=False, ml_confidence=0.5):
+def _dashboard_volume_regime(strategy_kind, regime_name):
+    strategy = str(strategy_kind or "").lower()
+    regime = str(regime_name or "").upper()
+    if strategy == "meanrev":
+        return "MEANREV"
+    if strategy == "breakout":
+        return "VOLATILE" if regime == "VOLATILE" else "BREAKOUT"
+    if regime in {"TREND", "TRENDING"}:
+        return "TRENDING"
+    if regime == "RANGE":
+        return "MEANREV"
+    return regime or "DEFAULT"
+
+
+def _dashboard_strategy_state(df, cfg):
+    if df.empty:
+        return {
+            "regime_name": "N/A",
+            "strategy_kind": "none",
+            "signal": "NEUTRAL",
+            "signal_reason": "sin datos",
+            "volume_ok": False,
+            "volume_reason": "sin datos",
+            "volume_regime": "DEFAULT",
+        }
+    last = df.iloc[-1].to_dict()
+    regime_info = regime_detector.classify_regime(df)
+    mode = str(cfg.get("strategy_mode", "regime")).lower()
+    strategy_kind = mode
+    signal_reason = ""
+    if mode == "regime":
+        regime_name = str(regime_info.get("regime") or "MIXED").upper()
+        if regime_name == "TREND":
+            strategy_kind = "trend"
+            signal = signal_trend(last, df, cfg)
+        elif regime_name == "RANGE":
+            strategy_kind = "meanrev"
+            signal = signal_meanrev(last, df, cfg)
+        elif regime_name == "VOLATILE":
+            strategy_kind = "breakout"
+            signal = signal_breakout(last, df, cfg)
+        else:
+            regime_name = "MIXED"
+            strategy_kind = "trend"
+            signal = signal_trend(last, df, cfg)
+            signal_reason = "regime MIXED -> fallback a trend con threshold elevado"
+    elif mode == "meanrev":
+        regime_name = "RANGE"
+        strategy_kind = "meanrev"
+        signal = signal_meanrev(last, df, cfg)
+    elif mode == "breakout":
+        regime_name = "BREAKOUT"
+        strategy_kind = "breakout"
+        signal = signal_breakout(last, df, cfg)
+    else:
+        regime_name = "TREND"
+        strategy_kind = "trend"
+        signal = signal_trend(last, df, cfg)
+    volume_regime = _dashboard_volume_regime(strategy_kind, regime_name)
+    volume_cfg = dict(cfg)
+    volume_cfg["_signal_side"] = signal
+    volume_ok, volume_reason = volume_filter_passes(df, volume_regime, volume_cfg)
+    return {
+        "regime_name": regime_name,
+        "strategy_kind": strategy_kind,
+        "signal": signal,
+        "signal_reason": signal_reason,
+        "volume_ok": bool(volume_ok),
+        "volume_reason": str(volume_reason),
+        "volume_regime": volume_regime,
+    }
+
+
+def _trade_gate_state(last, df, cfg, position=None, ml_ready=False, ml_confidence=0.5, ml_info=None):
     if last is None:
         return {"status": "SIN DATOS", "reason": "Esperando velas suficientes", "ready": False}
-
-    cols = {
-        "ema_fast": f"ema{int(cfg.get('ema_fast', 9))}",
-        "ema_slow": f"ema{int(cfg.get('ema_slow', 21))}",
-        "ema_trend": f"ema{int(cfg.get('ema_trend', 200))}",
-    }
-    ema_fast = _as_float(last.get(cols["ema_fast"]))
-    ema_slow = _as_float(last.get(cols["ema_slow"]))
-    ema_trend = _as_float(last.get(cols["ema_trend"]))
-    close = _as_float(last.get("close"))
-    rsi = _as_float(last.get("rsi"))
-    adx = _as_float(last.get("adx"))
-    volume = _as_float(last.get("volume"))
-    vol_ma20 = _as_float(last.get("vol_ma20"))
-    supertrend_dir = int(_as_float(last.get("supertrend_direction")))
-    adx_threshold = float(cfg.get("adx_threshold", 25))
-    volume_mult = float(cfg.get("volume_mult", 1.2))
-    rsi_min = float(cfg.get("rsi_min", 30))
-    rsi_max = float(cfg.get("rsi_max", 70))
-    ml_threshold = float(cfg.get("ml_threshold", 0.55))
-
     if position:
-        return {"status": "POSICIÓN ABIERTA", "reason": "Ya hay una operación activa", "ready": False}
-
-    long_ok = (
-        ema_fast > ema_slow
-        and close > ema_trend
-        and supertrend_dir == 1
-        and adx > adx_threshold
-        and volume > (vol_ma20 * volume_mult if vol_ma20 else 0)
-        and rsi_min < rsi < rsi_max
-    )
-    short_ok = (
-        ema_fast < ema_slow
-        and close < ema_trend
-        and supertrend_dir == -1
-        and adx > adx_threshold
-        and volume > (vol_ma20 * volume_mult if vol_ma20 else 0)
-        and rsi_min < rsi < rsi_max
-    )
-    signal = "LONG" if long_ok else "SHORT" if short_ok else "NEUTRAL"
+        return {"status": "POSICI?N ABIERTA", "reason": "Ya hay una operaci?n activa", "ready": False}
+    signal_state = _dashboard_strategy_state(df, cfg)
+    signal = signal_state["signal"]
     if signal == "NEUTRAL":
-        if adx <= adx_threshold:
-            return {"status": "ESPERANDO", "reason": f"ADX bajo ({adx:.2f} <= {adx_threshold:.2f})", "ready": False}
-        if vol_ma20 and volume <= vol_ma20 * volume_mult:
-            ratio = (volume / vol_ma20) if vol_ma20 else 0.0
-            return {"status": "ESPERANDO", "reason": f"Volumen bajo (x{ratio:.2f} < x{volume_mult:.2f})", "ready": False}
-        if not (rsi_min < rsi < rsi_max):
-            return {"status": "ESPERANDO", "reason": f"RSI fuera de rango ({rsi:.2f} vs {rsi_min:.0f}-{rsi_max:.0f})", "ready": False}
-        return {"status": "ESPERANDO", "reason": "Sin confluencia de entrada", "ready": False}
+        return {"status": "ESPERANDO", "reason": signal_state.get("signal_reason") or "Sin confluencia de entrada", "ready": False}
+    if not signal_state["volume_ok"]:
+        return {"status": "ESPERANDO", "reason": signal_state["volume_reason"], "ready": False}
     if not ml_ready:
-        return {"status": "FILTRADO", "reason": "ML entrenando", "ready": False}
+        reason = str((ml_info or {}).get("not_ready_reason") or "ML no listo")
+        return {"status": "PRIMARY ONLY", "reason": f"MODO PRIMARY (sin ML, half-size) | {reason}", "ready": True}
+    ml_threshold = float((ml_info or {}).get("suggested_threshold", cfg.get("ml_threshold", 0.55)))
     if ml_confidence < ml_threshold:
         return {"status": "FILTRADO", "reason": f"ML bajo umbral ({ml_confidence:.2f} < {ml_threshold:.2f})", "ready": False}
-    return {"status": "LISTO PARA OPERAR", "reason": f"Señal {signal} confirmada por filtros", "ready": True}
+    return {"status": "LISTO PARA OPERAR", "reason": f"Se?al {signal} confirmada por filtros", "ready": True}
 
 
 def _health_issues_for_symbol(exchange_pos, local_pos, registry_trade_id, open_rows, exchange_error=None):
@@ -619,6 +650,7 @@ def _build_symbol_payload(symbol):
         ml_info = {}
     ml_validation_accuracy = _as_float(ml_info.get("validation_accuracy"), 0.0)
     ml_validation_trades = int(ml_info.get("validation_trades") or 0)
+    no_profitable_threshold = bool(ml_info.get("no_profitable_threshold", False))
     features = build_features(df).iloc[-1].to_dict()
     ml_ready = False
     ml_confidence = 0.5
@@ -641,6 +673,8 @@ def _build_symbol_payload(symbol):
                 ml_confidence = 0.5
         except Exception:
             ml_confidence = 0.5
+    signal_state = _dashboard_strategy_state(df, cfg)
+    primary_only_mode = not ml_ready
     kpis = {
         "balance": balance,
         "balance_start": 50000.0,
@@ -661,6 +695,8 @@ def _build_symbol_payload(symbol):
         "ml_min_train_trades": ml_min_train_trades,
         "ml_validation_accuracy": ml_validation_accuracy,
         "ml_validation_trades": ml_validation_trades,
+        "no_profitable_threshold": no_profitable_threshold,
+        "primary_only_mode": primary_only_mode,
         "trade_stats": stats,
     }
     kpis["pnl_total"] = kpis["pnl_realized"] + kpis["pnl_unrealized"]
@@ -668,13 +704,19 @@ def _build_symbol_payload(symbol):
         "adx": _as_float(last.get("adx")),
         "supertrend_direction": int(_as_float(last.get(cols.get("supertrend_dir", "supertrend_direction")))) if last.get(cols.get("supertrend_dir", "supertrend_direction")) is not None else 0,
         "volume_ratio": _as_float(last.get("volume")) / _as_float(last.get("vol_ma20")) if _as_float(last.get("vol_ma20")) else 0.0,
+        "volume_z": _as_float(features.get("volume_z")),
+        "volume_quantile": _as_float(features.get("volume_quantile")),
+        "volume_filter_ok": bool(signal_state.get("volume_ok", False)),
+        "volume_filter_reason": str(signal_state.get("volume_reason") or ""),
+        "volume_filter_regime": str(signal_state.get("volume_regime") or "DEFAULT"),
         "atr": _as_float(last.get("atr")),
         "ema200": _as_float(last.get(cols.get("ema_trend", "ema200"))),
-        "market_regime": "TRENDING" if _as_float(last.get("adx")) > float(cfg.get("adx_threshold", 25)) else "RANGING",
+        "market_regime": signal_state.get("regime_name", "MIXED"),
         "daily_loss_pct": _daily_loss_pct(balance),
         "kelly_fraction": _kelly_fraction(),
+        "primary_only_mode": primary_only_mode,
     }
-    trade_gate = _trade_gate_state(last, cfg, position=position, ml_ready=ml_ready, ml_confidence=ml_confidence)
+    trade_gate = _trade_gate_state(last, df, cfg, position=position, ml_ready=ml_ready, ml_confidence=ml_confidence, ml_info=ml_info)
     candles = [
         {
             "ts": int(row["ts"]),
@@ -690,7 +732,7 @@ def _build_symbol_payload(symbol):
         "ema9": _as_float(last.get(cols.get("ema_fast", "ema9"))),
         "ema21": _as_float(last.get(cols.get("ema_slow", "ema21"))),
         "rsi": _as_float(last.get("rsi")),
-        "signal": _signal_from_last(last, cfg),
+        "signal": signal_state.get("signal", _signal_from_last(last, cfg)),
         "position": position,
         "candles": candles,
         "kpis": kpis,

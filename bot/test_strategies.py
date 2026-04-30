@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from bot_config import DEFAULT_CONFIG
-from strategies import signal_breakout, signal_meanrev, signal_trend
+from strategies import signal_breakout, signal_meanrev, signal_trend, volume_filter_passes
 
 
 def test_trend() -> None:
@@ -44,8 +44,24 @@ def test_breakout() -> None:
     assert signal_breakout(df.iloc[-1].to_dict(), df, DEFAULT_CONFIG) == "LONG"
 
 
+def test_volume_filter_trending_low_volume_passes() -> None:
+    volumes = list(range(1, 50)) + [16]
+    df = pd.DataFrame({"volume": volumes})
+    passed, _reason = volume_filter_passes(df, "TRENDING", DEFAULT_CONFIG)
+    assert passed is True
+
+
+def test_volume_filter_breakout_low_volume_blocks() -> None:
+    volumes = list(range(1, 50)) + [20]
+    df = pd.DataFrame({"volume": volumes})
+    passed, _reason = volume_filter_passes(df, "BREAKOUT", DEFAULT_CONFIG)
+    assert passed is False
+
+
 if __name__ == "__main__":
     test_trend()
     test_meanrev()
     test_breakout()
+    test_volume_filter_trending_low_volume_passes()
+    test_volume_filter_breakout_low_volume_blocks()
     print("test_strategies_ok")

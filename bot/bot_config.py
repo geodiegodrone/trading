@@ -29,7 +29,7 @@ DEFAULT_CONFIG: Dict[str, float | int] = {
     "rsi_min": 30,
     "rsi_max": 70,
     "ml_threshold": 0.55,
-    "ml_auto_bootstrap_days": int(os.getenv("ML_BOOTSTRAP_DAYS", "120")),
+    "ml_auto_bootstrap_days": int(os.getenv("ML_BOOTSTRAP_DAYS", "365")),
     "ml_watchdog_hours": float(os.getenv("ML_WATCHDOG_HOURS", "24")),
     "ml_force_bootstrap_after_failures": int(os.getenv("ML_FORCE_BOOTSTRAP_FAILS", "3")),
     "daily_risk_cap": 5.0,

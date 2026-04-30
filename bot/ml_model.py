@@ -372,7 +372,6 @@ def _optimize_threshold(
 ) -> Dict[str, float]:
     candidates = np.arange(MIN_THRESHOLD, MAX_THRESHOLD + 0.0001, 0.005)
     best: Dict[str, float] | None = None
-    fallback: Dict[str, float] | None = None
     for tau in candidates:
         mask = np.asarray(probs) >= tau
         selected_r = np.asarray(r_values, dtype=float)[mask]
@@ -398,17 +397,31 @@ def _optimize_threshold(
             "tau": float(round(tau, 3)),
             "score": float(expected_r * math.sqrt(max(1, trade_count)) - 0.5 * std_r),
             "sharpe": float(sharpe),
+            "expected_r": float(expected_r),
             "trades": float(trade_count),
             "coverage_pct": float(coverage_pct),
             "f1": float(f1),
             "drawdown": float(drawdown),
             "trades_per_year": float(trades_per_year),
         }
-        if trade_count >= MIN_VALIDATION_TRADES and (best is None or row["score"] > best["score"]):
+        if (
+            trade_count >= MIN_VALIDATION_TRADES
+            and row["expected_r"] > 0.0
+            and row["sharpe"] > 0.0
+            and (best is None or row["score"] > best["score"])
+        ):
             best = row
-        if fallback is None or row["f1"] > fallback["f1"] or (row["f1"] == fallback["f1"] and row["tau"] > fallback["tau"]):
-            fallback = row
-    selected = best or fallback or {
+    if best is None:
+        return {
+            "tau": 0.55,
+            "val_sharpe": 0.0,
+            "validation_trades": 0,
+            "coverage_pct": 0.0,
+            "min_trades_per_year_estimate": 0.0,
+            "fallback_to_f1": True,
+            "no_profitable_threshold": True,
+        }
+    selected = best or {
         "tau": 0.55,
         "score": 0.0,
         "sharpe": 0.0,
@@ -424,7 +437,8 @@ def _optimize_threshold(
         "validation_trades": int(selected["trades"]),
         "coverage_pct": float(selected["coverage_pct"]),
         "min_trades_per_year_estimate": float(selected["trades_per_year"]),
-        "fallback_to_f1": bool(best is None),
+        "fallback_to_f1": False,
+        "no_profitable_threshold": False,
     }
 
 
@@ -440,6 +454,8 @@ def _mean_or_zero(values: Sequence[float]) -> float:
 
 def _readiness_reason(state: Dict[str, Any]) -> str:
     reasons: List[str] = []
+    if bool(state.get("no_profitable_threshold", False)):
+        reasons.append("sin τ con expected_r>0 y sharpe>0")
     if int(state.get("trained_on", 0) or 0) < MIN_TRAIN_TRADES:
         reasons.append(f"faltan muestras ({int(state.get('trained_on', 0) or 0)}/{MIN_TRAIN_TRADES})")
     if int(state.get("usable_folds", 0) or 0) <= 0:
@@ -731,6 +747,7 @@ def _train_bootstrap(events: pd.DataFrame, df_klines: pd.DataFrame) -> Dict[str,
         "oof_count": int(scored_mask.sum()),
         "usable_folds": int(len(usable_folds)),
         "fallback_to_f1": bool(threshold_info["fallback_to_f1"]),
+        "no_profitable_threshold": bool(threshold_info.get("no_profitable_threshold", False)),
         "model_type": "lightgbm" if USING_LIGHTGBM else "xgboost",
     }
     state["ready"] = False
@@ -797,6 +814,7 @@ def _train_legacy(trades: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         "oof_count": int(len(valid_idx)),
         "usable_folds": 1,
         "fallback_to_f1": bool(threshold_info["fallback_to_f1"]),
+        "no_profitable_threshold": bool(threshold_info.get("no_profitable_threshold", False)),
         "model_type": "lightgbm" if USING_LIGHTGBM else "xgboost",
     }
     state["ready"] = False
@@ -887,4 +905,5 @@ def model_info(symbol: Optional[str] = "BTCUSDT") -> Dict[str, Any]:
         "not_ready_reason": str(state.get("not_ready_reason") or _readiness_reason(state)),
         "usable_folds": int(state.get("usable_folds", 0) or 0),
         "fallback_to_f1": bool(state.get("fallback_to_f1", False)),
+        "no_profitable_threshold": bool(state.get("no_profitable_threshold", False)),
     }
