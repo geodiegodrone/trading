@@ -25,7 +25,7 @@ def _primary_signals(primary_df: pd.DataFrame, confirmation_df: pd.DataFrame, cf
     return pd.DataFrame(rows)
 
 
-def bootstrap(days: int = 180, symbol: str = "BTCUSDT", timeframe: int | None = None, quiet: bool = False) -> Dict[str, Any]:
+def bootstrap(days: int = 180, symbol: str = "BTCUSDT", timeframe: int | None = None, quiet: bool = False, trade_usdt: float | None = None) -> Dict[str, Any]:
     cfg = multi_bot._get_symbol_config(symbol)
     cfg["primary_timeframe"] = int(timeframe or cfg.get("primary_timeframe", 60))
     primary_df = bwf.fetch_history(symbol, int(cfg["primary_timeframe"]), days)

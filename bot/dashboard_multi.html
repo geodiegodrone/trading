@@ -2053,6 +2053,7 @@
     const state = {
       portfolio: null,
       agents: null,
+      mlInfo: null,
       symbols: Object.fromEntries(SYMBOLS.map((s) => [s, { snapshot: null, chart: null, chartTimeframe: '1d', chartSnapshot: null }]))
     };
 
@@ -2158,6 +2159,8 @@
                 <div class="kpi-label">${labelWithInfo('Estado ML', 'Estado del modelo de inteligencia artificial y su confianza actual.')}</div>
                 <div class="kpi-value" id="${id(symbol,'kpiMlStatus')}">--</div>
                 <div class="kpi-sub" id="${id(symbol,'kpiMlHint')}">--</div>
+                <div class="kpi-sub" id="${id(symbol,'kpiMlMeta')}">--</div>
+                <button type="button" class="pill action" id="${id(symbol,'mlRetrainBtn')}" style="width:max-content; margin-top:10px;">Reentrenar ahora</button>
               </div>
               <div class="kpi-card">
                 <div class="kpi-label">${labelWithInfo('Listo para operar', 'Indica si el bot puede abrir una posición ahora mismo y por qué está bloqueado si no puede.')}</div>
@@ -2731,6 +2734,10 @@
       symbolPanels.innerHTML = SYMBOLS.map(panelTemplate).join('');
       SYMBOLS.forEach((symbol) => {
         buildChartControls(symbol);
+        const btn = document.getElementById(id(symbol, 'mlRetrainBtn'));
+        if (btn) {
+          btn.addEventListener('click', () => triggerMlRetrain(symbol));
+        }
       });
     }
 
@@ -2837,6 +2844,7 @@
       const mlMinTrainTrades = Number(kpis?.ml_min_train_trades ?? 20);
       const mlValidationAccuracy = Number(kpis?.ml_validation_accuracy ?? 0);
       const mlValidationTrades = Number(kpis?.ml_validation_trades ?? 0);
+      const mlInfo = state.mlInfo || {};
       const tradeStats = kpis?.trade_stats || {};
       const statsTotal = Number(tradeStats.total ?? tradeCount);
       const statsWins = Number(tradeStats.wins ?? wins);
@@ -2866,14 +2874,30 @@
       setText('kpiTrades', `${closedTrades.toLocaleString('en-US')} cerradas (${openTrades} abiertas)`);
       setText('kpiTradesSub', hasClosedTrades ? `${statsWins}W ${statsLosses}L` : 'Sin trades cerrados todavía');
       setText('kpiBestWorst', hasClosedTrades ? `${formatMoney(bestTrade)} / ${formatMoney(worstTrade)}` : '-- / --');
-      if (mlReady) {
-        setText('kpiMlStatus', `Active (${mlConfidence.toFixed(2)})`);
-        document.getElementById(id(symbol, 'kpiMlStatus')).style.color = mlConfidence >= 0.55 ? 'var(--green)' : 'var(--yellow)';
-        setText('kpiMlHint', `Confidence: ${mlConfidence.toFixed(2)} | Val: ${(mlValidationAccuracy * 100).toFixed(1)}% (${mlValidationTrades})`);
+      const mlStatusEl = document.getElementById(id(symbol, 'kpiMlStatus'));
+      const mlHintEl = document.getElementById(id(symbol, 'kpiMlHint'));
+      const mlMetaEl = document.getElementById(id(symbol, 'kpiMlMeta'));
+      const retraining = Boolean(mlInfo?.retraining);
+      if (retraining) {
+        setText('kpiMlStatus', '⏳ Reentrenando...');
+        if (mlStatusEl) mlStatusEl.style.color = 'var(--yellow)';
+      } else if (mlReady || mlInfo?.ready) {
+        setText('kpiMlStatus', `READY (${Number(mlInfo?.suggested_threshold ?? mlConfidence).toFixed(2)})`);
+        if (mlStatusEl) mlStatusEl.style.color = 'var(--green)';
       } else {
-        setText('kpiMlStatus', `Training (${Math.min(mlTrainingTrades, mlMinTrainTrades)}/${mlMinTrainTrades} trades)`);
-        document.getElementById(id(symbol, 'kpiMlStatus')).style.color = 'var(--yellow)';
-        setText('kpiMlHint', `Waiting for ${mlMinTrainTrades} real closed trades | Val: ${(mlValidationAccuracy * 100).toFixed(1)}% (${mlValidationTrades})`);
+        setText('kpiMlStatus', `Training (${Math.min(Number(mlInfo?.trained_on ?? mlTrainingTrades), mlMinTrainTrades)}/${mlMinTrainTrades} trades)`);
+        if (mlStatusEl) mlStatusEl.style.color = 'var(--yellow)';
+      }
+      if (mlHintEl) {
+        mlHintEl.textContent = `trained_on=${Number(mlInfo?.trained_on ?? mlTrainingTrades)} | sharpe=${Number(mlInfo?.val_sharpe ?? 0).toFixed(2)} | thr=${Number(mlInfo?.suggested_threshold ?? mlConfidence).toFixed(2)}`;
+      }
+      if (mlMetaEl) {
+        mlMetaEl.textContent = `ready=${Boolean(mlInfo?.ready)} | last=${mlInfo?.last_trained_at || '--'} | closed_real=${Number(mlInfo?.n_trades_real_closed ?? mlValidationTrades)}`;
+      }
+      const mlBtn = document.getElementById(id(symbol, 'mlRetrainBtn'));
+      if (mlBtn) {
+        mlBtn.disabled = retraining;
+        mlBtn.textContent = retraining ? '⏳ Reentrenando...' : 'Reentrenar ahora';
       }
       setText('kpiStats', hasClosedTrades ? `${statsWinRate.toFixed(1)}%` : '--');
       document.getElementById(id(symbol, 'kpiStats')).style.color = statsWinRate >= 60 ? 'var(--green)' : statsWinRate >= 40 ? 'var(--yellow)' : 'var(--red)';
@@ -3077,6 +3101,48 @@
         if (!res.ok) return;
         const report = await res.json();
         renderHealthReport(report);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function refreshMlInfo() {
+      try {
+        const res = await fetch('/api/ml/info', { method: 'GET' });
+        if (!res.ok) return;
+        state.mlInfo = await res.json();
+        SYMBOLS.forEach((symbol) => {
+          const snapshot = state.symbols[symbol]?.snapshot;
+          if (snapshot?.kpis) setKpis(symbol, snapshot.kpis);
+        });
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function triggerMlRetrain(symbol) {
+      const btn = document.getElementById(id(symbol, 'mlRetrainBtn'));
+      if (btn) btn.disabled = true;
+      try {
+        const res = await fetch('/api/ml/retrain', { method: 'POST' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await refreshMlInfo();
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setTimeout(async () => {
+          await refreshMlInfo();
+          if (btn) btn.disabled = false;
+        }, 1000);
+      }
+    }
+
+    async function refreshLoopStatus() {
+      try {
+        const res = await fetch('/api/loop/status', { method: 'GET' });
+        if (!res.ok) return;
+        const payload = await res.json();
+        if (Array.isArray(payload) && payload.length) updateActivity(payload);
       } catch (err) {
         console.error(err);
       }
@@ -3460,7 +3526,11 @@
     window.addEventListener('resize', () => SYMBOLS.forEach((symbol) => resizeChart(symbol)));
     switchTab('portfolio');
     loadLatestHealthCheck();
+    refreshMlInfo();
+    refreshLoopStatus();
     setInterval(loadLatestHealthCheck, 300000);
+    setInterval(refreshMlInfo, 5000);
+    setInterval(refreshLoopStatus, 5000);
   </script>
 </body>
 </html>

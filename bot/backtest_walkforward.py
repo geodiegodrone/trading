@@ -180,7 +180,7 @@ def _mode_signal(mode: str, primary_slice: pd.DataFrame, confirm_row: pd.Series 
         elif regime_name == "VOLATILE":
             signal = signal_breakout(last, primary_slice, cfg)
         else:
-            signal = "NEUTRAL"
+            signal = signal_trend(last, primary_slice, cfg)
     if signal != "NEUTRAL" and not _htf_confirms(signal, confirm_row, cfg):
         return "NEUTRAL", regime_name
     return signal, regime_name

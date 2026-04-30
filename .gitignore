@@ -22,6 +22,7 @@ __pycache__/
 /bot/weekly_balance.json
 /bot/balance_cache.json
 /bot/circuit_breaker_state.json
+/bot/activity_log.jsonl
 /bot/portfolio_state.json
 /bot/open_trade_id.json
 /bot/__pycache__/

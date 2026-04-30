@@ -46,20 +46,23 @@ def signal_trend(last: Dict[str, Any], df: pd.DataFrame, cfg: Dict[str, Any]) ->
     volume = _safe_float(last.get("volume"))
     vol_ma20 = _safe_float(last.get("vol_ma20"))
     supertrend_dir = int(_safe_float(last.get(cols.get("supertrend_dir", "supertrend_direction"))))
+    primary_tf = int(cfg.get("primary_timeframe", cfg.get("timeframe", 60)))
+    adx_threshold = float(cfg.get("adx_threshold_1h", 18)) if primary_tf >= 60 else float(cfg.get("adx_threshold", 25))
+    volume_mult = float(cfg.get("volume_mult_1h", 1.0)) if primary_tf >= 60 else float(cfg.get("volume_mult", 1.2))
     long_ok = (
         ema_fast > ema_slow
         and close > ema_trend
         and supertrend_dir == 1
-        and adx > float(cfg.get("adx_threshold", 25))
-        and volume > (vol_ma20 * float(cfg.get("volume_mult", 1.2)) if vol_ma20 else 0.0)
+        and adx > adx_threshold
+        and volume > (vol_ma20 * volume_mult if vol_ma20 else 0.0)
         and float(cfg.get("rsi_min", 30)) < rsi < float(cfg.get("rsi_max", 70))
     )
     short_ok = (
         ema_fast < ema_slow
         and close < ema_trend
         and supertrend_dir == -1
-        and adx > float(cfg.get("adx_threshold", 25))
-        and volume > (vol_ma20 * float(cfg.get("volume_mult", 1.2)) if vol_ma20 else 0.0)
+        and adx > adx_threshold
+        and volume > (vol_ma20 * volume_mult if vol_ma20 else 0.0)
         and float(cfg.get("rsi_min", 30)) < rsi < float(cfg.get("rsi_max", 70))
     )
     if long_ok:

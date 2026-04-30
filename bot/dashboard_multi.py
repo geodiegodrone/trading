@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -810,14 +811,58 @@ def _portfolio_payload():
         "ml_confidence": 0.5,
         "circuit_breaker": cb_status,
     }
+def _ml_info_payload():
+    info = dict(ml_model.model_info("BTCUSDT"))
+    info["n_trades_real_closed"] = int(trade_log.get_stats("BTCUSDT").get("total", 0))
+    info["retraining"] = bool(_ml_retrain_state.get("running"))
+    info["retraining_started_at"] = _ml_retrain_state.get("started_at")
+    info["last_error"] = _ml_retrain_state.get("last_error")
+    info["last_result"] = _ml_retrain_state.get("last_result")
+    return info
 
 
+def _start_ml_retrain():
+    if _ml_retrain_state.get("running"):
+        return False
+
+    def _worker():
+        _ml_retrain_state["running"] = True
+        _ml_retrain_state["started_at"] = datetime.now(timezone.utc).isoformat()
+        _ml_retrain_state["last_error"] = None
+        try:
+            import bootstrap_ml
+
+            cfg = get_symbol_config("BTCUSDT")
+            activity_log.push("BTCUSDT", "ml", "⚙️ Reentreno manual iniciado desde dashboard")
+            result = bootstrap_ml.bootstrap(
+                symbol="BTCUSDT",
+                days=int(cfg.get("ml_auto_bootstrap_days", 120)),
+                timeframe=int(cfg.get("primary_timeframe", cfg.get("timeframe", 60))),
+                trade_usdt=50,
+                quiet=True,
+            )
+            _ml_retrain_state["last_result"] = result
+            info = ml_model.model_info("BTCUSDT")
+            activity_log.push(
+                "BTCUSDT",
+                "ml",
+                f"✅ Reentreno manual finalizado: trained={int(info.get('trained_on', 0))} ready={bool(info.get('ready', False))} sharpe={float(info.get('val_sharpe', 0.0)):.2f} thr={float(info.get('suggested_threshold', 0.55)):.2f}",
+            )
+        except Exception as exc:
+            _ml_retrain_state["last_error"] = str(exc)
+            activity_log.push("BTCUSDT", "ml", f"❌ Reentreno manual error: {exc}")
+        finally:
+            _ml_retrain_state["running"] = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return True
 
 
 _cache: dict = {}
 _health_cache: dict = {"report": None}
 _recovery_cache: dict = {"report": None}
 _auto_recovery_state: dict = {"last_ts": 0.0}
+_ml_retrain_state: dict = {"running": False, "started_at": None, "last_error": None, "last_result": None}
 
 
 def _store_health_report(report: dict):
@@ -1108,6 +1153,21 @@ async def api_circuit_breaker_resume():
     circuit_breaker.set_manual_override(True)
     ok = circuit_breaker.force_resume()
     return {"ok": ok, "status": circuit_breaker.get_status()}
+
+
+@app.get("/api/ml/info")
+async def api_ml_info():
+    return _ml_info_payload()
+
+
+@app.post("/api/ml/retrain")
+async def api_ml_retrain():
+    return {"started": _start_ml_retrain()}
+
+
+@app.get("/api/loop/status")
+async def api_loop_status():
+    return activity_log.get_recent(50, event_type="loop")
 
 
 @app.websocket("/ws/portfolio")

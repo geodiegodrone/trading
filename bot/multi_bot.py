@@ -15,7 +15,7 @@ import binance_broker
 import circuit_breaker
 import market_stream
 from bot_config import DEFAULT_CONFIG, get_symbol_config, parse_symbols
-from features import build_features
+from features import FEATURE_COLUMNS, build_features
 import ml_model
 import regime as regime_detector
 from strategies import enrich_indicators, signal_breakout, signal_meanrev, signal_trend
@@ -38,6 +38,9 @@ stop_event = threading.Event()
 ML_RETRAIN_EVERY = max(1, int(os.getenv("ML_RETRAIN_EVERY", "10")))
 ML_THRESHOLD_OVERRIDE = os.getenv("ML_THRESHOLD_OVERRIDE")
 _ML_NOT_READY_STATE = {}
+_LAST_DECISION_LOG = {}
+_ML_BOOTSTRAP_STATE = {"thread": None, "running": False, "last_started": 0.0, "last_completed": 0.0}
+_ML_RETRAIN_FAILURES = {}
 
 
 def _load_json(path, default):
@@ -86,6 +89,9 @@ def _get_symbol_config(symbol):
     cfg["rsi_min"] = float(cfg.get("rsi_min", 30))
     cfg["rsi_max"] = float(cfg.get("rsi_max", 70))
     cfg["ml_threshold"] = float(cfg.get("ml_threshold", 0.55))
+    cfg["ml_auto_bootstrap_days"] = int(cfg.get("ml_auto_bootstrap_days", 120))
+    cfg["ml_watchdog_hours"] = float(cfg.get("ml_watchdog_hours", 24.0))
+    cfg["ml_force_bootstrap_after_failures"] = int(cfg.get("ml_force_bootstrap_after_failures", 3))
     cfg["daily_risk_cap"] = float(cfg.get("daily_risk_cap", 5.0))
     cfg["breakeven_r"] = float(cfg.get("breakeven_r", 1.0))
     cfg["breakeven_buffer_pct"] = float(cfg.get("breakeven_buffer_pct", 0.0))
@@ -104,6 +110,8 @@ def _get_symbol_config(symbol):
     cfg["breakout_atr_mult"] = float(cfg.get("breakout_atr_mult", 1.0))
     cfg["breakout_tp_atr_mult"] = float(cfg.get("breakout_tp_atr_mult", 3.0))
     cfg["volatile_atr_mult"] = float(cfg.get("volatile_atr_mult", 2.0))
+    cfg["adx_threshold_1h"] = float(cfg.get("adx_threshold_1h", 18.0))
+    cfg["volume_mult_1h"] = float(cfg.get("volume_mult_1h", 1.0))
     return cfg
 
 
@@ -695,25 +703,131 @@ def _ml_confidence(features, symbol):
     return 0.5
 
 
+def _loop_context_hash(ctx):
+    return "|".join(
+        [
+            str(ctx.get("regime") or "N/A"),
+            str(ctx.get("strategy_used") or "none"),
+            str(ctx.get("signal") or "NEUTRAL"),
+            str(ctx.get("ml_ready")),
+            f"{_as_float(ctx.get('ml_confidence')):.4f}",
+            f"{_as_float(ctx.get('ml_threshold_used')):.4f}",
+            str(ctx.get("circuit_breaker") or "active"),
+            str(ctx.get("decision") or "SALTAR"),
+            str(ctx.get("decision_reason") or "-"),
+        ]
+    )
+
+
+def _log_decision(symbol, ctx):
+    now = time.time()
+    digest = _loop_context_hash(ctx)
+    prev = _LAST_DECISION_LOG.get(symbol) or {}
+    if prev.get("hash") == digest and (now - float(prev.get("ts", 0.0))) < 300:
+        return
+    ml_ready = bool(ctx.get("ml_ready"))
+    confidence = _as_float(ctx.get("ml_confidence"), 0.0)
+    threshold = _as_float(ctx.get("ml_threshold_used"), 0.0)
+    ml_text = f"{confidence:.0%}/{threshold:.2f}{'✓' if ml_ready else '✗ml_not_ready'}"
+    message = (
+        f"regime={ctx.get('regime', 'N/A')} strat={ctx.get('strategy_used', 'none')} "
+        f"signal={ctx.get('signal', 'NEUTRAL')} ml={ml_text} cb={ctx.get('circuit_breaker', 'active')} "
+        f"→ {ctx.get('decision', 'SALTAR')} ({ctx.get('decision_reason', '-')})"
+    )
+    activity_log.push(symbol, "loop", message)
+    _LAST_DECISION_LOG[symbol] = {"ts": now, "hash": digest}
+
+
+def _ml_bootstrap_reason(symbol, cfg):
+    reasons = []
+    try:
+        model_path = ml_model._model_path(symbol)
+    except Exception:
+        model_path = ROOT / f"model_{symbol}.pkl"
+    info = ml_model.model_info(symbol)
+    expected_features = len(FEATURE_COLUMNS)
+    if not model_path.exists():
+        reasons.append("modelo ausente")
+    if int(info.get("trained_on", 0) or 0) == 0:
+        reasons.append("trained_on=0")
+    if int(info.get("feature_count", 0) or 0) != expected_features:
+        reasons.append(f"feature_count mismatch {int(info.get('feature_count', 0) or 0)}!={expected_features}")
+    last_trained = str(info.get("last_trained_at") or "").strip()
+    if not last_trained:
+        reasons.append("sin last_trained_at")
+    else:
+        try:
+            trained_at = datetime.fromisoformat(last_trained.replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - trained_at).total_seconds() > 7 * 24 * 3600:
+                reasons.append("modelo vencido >7d")
+        except Exception:
+            reasons.append("last_trained_at inválido")
+    return reasons, info, expected_features
+
+
+def _ensure_ml_bootstrapped(symbol, cfg, force=False, reason_override=None):
+    reasons, info, _ = _ml_bootstrap_reason(symbol, cfg)
+    if reason_override:
+        reasons = [reason_override]
+    if not reasons and not force:
+        return False
+    thread = _ML_BOOTSTRAP_STATE.get("thread")
+    if thread is not None and getattr(thread, "is_alive", lambda: False)():
+        return False
+
+    def _runner():
+        _ML_BOOTSTRAP_STATE["running"] = True
+        try:
+            import bootstrap_ml
+
+            activity_log.push(symbol, "ml", f"⚙️ Auto-bootstrap iniciado (motivo: {'; '.join(reasons)})")
+            result = bootstrap_ml.bootstrap(
+                symbol="BTCUSDT",
+                days=int(cfg.get("ml_auto_bootstrap_days", 120)),
+                timeframe=int(cfg.get("primary_timeframe", 60)),
+                trade_usdt=50,
+                quiet=True,
+            )
+            trained_on = int(result.get("labels") or ml_model.model_info(symbol).get("trained_on", 0))
+            ready = bool(ml_model.is_ready(symbol))
+            sharpe = float(result.get("val_sharpe", ml_model.model_info(symbol).get("val_sharpe", 0.0)))
+            threshold = float(result.get("suggested_threshold", ml_model.model_info(symbol).get("suggested_threshold", cfg.get("ml_threshold", 0.55))))
+            activity_log.push(symbol, "ml", f"✅ Bootstrap finalizado: trained={trained_on} ready={ready} sharpe={sharpe:.2f} thr={threshold:.2f}")
+        except Exception as exc:
+            activity_log.push(symbol, "ml", f"❌ Bootstrap error: {exc}")
+            logger.exception("Auto-bootstrap failed for %s", symbol)
+        finally:
+            _ML_BOOTSTRAP_STATE["running"] = False
+            _ML_BOOTSTRAP_STATE["last_completed"] = time.time()
+
+    worker = threading.Thread(target=_runner, daemon=True)
+    _ML_BOOTSTRAP_STATE["thread"] = worker
+    _ML_BOOTSTRAP_STATE["last_started"] = time.time()
+    worker.start()
+    return True
+
+
 def _retrain_if_ready(symbol):
     try:
+        cfg = _get_symbol_config(symbol)
         stats = trade_log.get_stats(symbol)
         closed_trades = int(stats.get("total", 0))
         if closed_trades <= 0 or closed_trades % ML_RETRAIN_EVERY != 0:
             return
-        import bootstrap_ml
-
-        result = bootstrap_ml.bootstrap(
-            days=int(os.getenv("ML_BOOTSTRAP_DAYS", "180")),
-            symbol=symbol,
-            timeframe=int(_get_symbol_config(symbol).get("primary_timeframe", 60)),
-            quiet=True,
-        )
-        activity_log.push(
-            symbol,
-            "ml",
-            f"Meta-ML reentrenado | trades={closed_trades} | sharpe={float(result.get('val_sharpe', 0.0)):.2f} | tau={float(result.get('suggested_threshold', 0.55)):.3f}",
-        )
+        info = ml_model.model_info(symbol)
+        if not bool(info.get("ready", False)) and int(info.get("trained_on", 0) or 0) == 0:
+            threading.Thread(target=lambda: _ensure_ml_bootstrapped(symbol, cfg), daemon=True).start()
+            return
+        if not bool(info.get("ready", False)):
+            failures = int(_ML_RETRAIN_FAILURES.get(symbol, 0)) + 1
+            _ML_RETRAIN_FAILURES[symbol] = failures
+            activity_log.push(symbol, "ml", f"Modelo no listo tras cierre #{closed_trades}; intento {failures}/{int(cfg.get('ml_force_bootstrap_after_failures', 3))}")
+            if failures >= int(cfg.get("ml_force_bootstrap_after_failures", 3)):
+                _ML_RETRAIN_FAILURES[symbol] = 0
+                _ensure_ml_bootstrapped(symbol, cfg, force=True, reason_override=f"retrain attempts={failures}")
+            return
+        _ML_RETRAIN_FAILURES[symbol] = 0
+        _ensure_ml_bootstrapped(symbol, cfg, force=True, reason_override=f"{closed_trades} trades cerrados")
     except Exception as exc:
         logger.warning("ML retrain failed for %s: %s", symbol, exc)
 
@@ -1026,35 +1140,71 @@ def _select_signal(symbol, primary_df, confirmation_df, cfg):
     regime_name = "TREND"
     mode = str(cfg.get("strategy_mode", "regime")).lower()
     strategy_name = mode
+    meta = {"mixed_fallback": False, "reason": "", "source": mode}
+    last = primary_df.iloc[-1].to_dict()
     if mode == "regime":
         regime_info = regime_detector.classify_regime(primary_df)
         regime_name = str(regime_info.get("regime", "MIXED")).upper()
-        activity_log.push(symbol, "regime", f"Régimen {regime_name} | source={regime_info.get('source')} | hurst={float(regime_info.get('hurst', 0.0)):.2f} | vol={float(regime_info.get('realized_volatility_pct', 0.0)):.2f}%")
+        activity_log.push(symbol, "regime", f"Regime {regime_name} | source={regime_info.get('source')} | hurst={float(regime_info.get('hurst', 0.0)):.2f} | vol={float(regime_info.get('realized_volatility_pct', 0.0)):.2f}%")
         if regime_name == "TREND":
             strategy_name = "trend"
-            signal = signal_trend(primary_df.iloc[-1].to_dict(), primary_df, cfg)
+            signal = signal_trend(last, primary_df, cfg)
         elif regime_name == "RANGE":
             strategy_name = "meanrev"
-            signal = signal_meanrev(primary_df.iloc[-1].to_dict(), primary_df, cfg)
+            signal = signal_meanrev(last, primary_df, cfg)
         elif regime_name == "VOLATILE":
             strategy_name = "breakout"
-            signal = signal_breakout(primary_df.iloc[-1].to_dict(), primary_df, cfg)
+            signal = signal_breakout(last, primary_df, cfg)
         else:
-            return "NEUTRAL", strategy_name, regime_name
+            strategy_name = "trend"
+            meta["mixed_fallback"] = True
+            meta["reason"] = "regime MIXED -> fallback a trend con threshold elevado"
+            signal = signal_trend(last, primary_df, cfg)
     elif mode == "meanrev":
         regime_name = "RANGE"
-        signal = signal_meanrev(primary_df.iloc[-1].to_dict(), primary_df, cfg)
+        signal = signal_meanrev(last, primary_df, cfg)
     elif mode == "breakout":
         regime_name = "VOLATILE"
-        signal = signal_breakout(primary_df.iloc[-1].to_dict(), primary_df, cfg)
+        signal = signal_breakout(last, primary_df, cfg)
     else:
         regime_name = "TREND"
         strategy_name = "trend"
-        signal = signal_trend(primary_df.iloc[-1].to_dict(), primary_df, cfg)
+        signal = signal_trend(last, primary_df, cfg)
     if signal != "NEUTRAL" and not _htf_confirms(signal, confirmation_df, cfg):
         activity_log.push(symbol, "signal", f"HTF 4h no confirma {signal}")
-        return "NEUTRAL", strategy_name, regime_name
-    return signal, strategy_name, regime_name
+        meta["reason"] = f"HTF 4h no confirma {signal}"
+        return "NEUTRAL", strategy_name, regime_name, meta
+    return signal, strategy_name, regime_name, meta
+
+
+def _startup_diagnostics(symbol, cfg):
+    info = ml_model.model_info(symbol)
+    cb_status = circuit_breaker.get_status()
+    daily = _load_daily_balance()
+    trades = trade_log.get_all_trades(symbol)
+    stats = trade_log.get_stats(symbol)
+    expected = len(FEATURE_COLUMNS)
+    model_count = int(info.get("feature_count", 0) or 0)
+    mismatch = model_count not in (0, expected)
+    lines = [
+        "=" * 60,
+        "BOT STARTUP DIAGNOSTICS",
+        f"Strategy mode: {cfg['strategy_mode']}",
+        f"Primary TF: {int(cfg['primary_timeframe'])}m | Confirmation TF: {int(cfg['confirmation_timeframe'])}m",
+        f"ML model: trained_on={int(info.get('trained_on', 0) or 0)} ready={bool(info.get('ready', False))} sharpe={float(info.get('val_sharpe', 0.0)):.2f} thr={float(info.get('suggested_threshold', cfg.get('ml_threshold', 0.55))):.2f}",
+        f"ML feature count expected={expected} / model={model_count} {'MISMATCH!' if mismatch else 'OK'}",
+        f"Circuit breaker: enabled={bool(cfg.get('circuit_breaker_enabled', True))} paused={bool(cb_status.get('paused', False))}",
+        f"Trades in DB: total={len(trades)} closed_real={int(stats.get('total', 0))}",
+        f"Daily start balance: {_as_float(daily.get('daily_start_balance'), 0.0):.2f} USDT",
+        "=" * 60,
+    ]
+    return lines
+
+
+def _emit_startup_diagnostics(symbol, cfg):
+    for line in _startup_diagnostics(symbol, cfg):
+        logger.info(line)
+        activity_log.push(symbol, "startup", line)
 
 
 def run_symbol(symbol, cfg, shared_stop_event):
@@ -1073,44 +1223,33 @@ def run_symbol(symbol, cfg, shared_stop_event):
             primary_df = _compute_indicators(_fetch_candles(symbol, cfg["primary_timeframe"], limit=450), cfg)
             confirmation_df = _compute_indicators(_fetch_candles(symbol, cfg["confirmation_timeframe"], limit=320), cfg)
             if primary_df.empty or confirmation_df.empty or len(primary_df) < 220 or len(confirmation_df) < 220:
+                _log_decision(symbol, {"regime": "N/A", "strategy_used": "none", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": float(cfg.get("ml_threshold", 0.55)), "circuit_breaker": "active", "decision": "SALTAR", "decision_reason": "velas insuficientes"})
                 time.sleep(60)
                 continue
             feature_frame = build_features(primary_df)
             last = primary_df.iloc[-1].to_dict()
             feature_context = feature_frame.iloc[-1].to_dict()
-            signal, strategy_kind, regime_name = _select_signal(symbol, primary_df, confirmation_df, cfg)
-            cols = primary_df.attrs.get("indicator_cols", {})
-            ema_fast = _as_float(last.get(cols.get("ema_fast", "ema9")))
-            ema_slow = _as_float(last.get(cols.get("ema_slow", "ema21")))
-            ema_trend = _as_float(last.get(cols.get("ema_trend", "ema200")))
-            rsi = _as_float(last.get("rsi"))
-            adx = _as_float(last.get("adx"))
-            activity_log.push(symbol, "signal", f"Señal: {signal} | mode={strategy_kind} | regime={regime_name} | EMA{cfg['ema_fast']}={ema_fast:.1f} EMA{cfg['ema_slow']}={ema_slow:.1f} RSI={rsi:.1f} ADX={adx:.1f}")
+            signal, strategy_kind, regime_name, signal_meta = _select_signal(symbol, primary_df, confirmation_df, cfg)
             position = _get_current_position(symbol)
             if position:
                 _update_position(symbol, last, signal, cfg)
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": bool(ml_model.is_ready(symbol)), "ml_confidence": 0.0, "ml_threshold_used": float(cfg.get("ml_threshold", 0.55)), "circuit_breaker": "active", "decision": "POSICION_ABIERTA", "decision_reason": "gestion de posicion en curso"})
                 time.sleep(60)
                 continue
+            cb_status_text = "active"
             if cfg.get("circuit_breaker_enabled", True):
                 paused, reason = circuit_breaker.is_paused()
                 if not paused:
-                    paused, reason = circuit_breaker.check_circuit_breaker(
-                        balance,
-                        _as_float(daily_state.get("daily_start_balance"), balance),
-                        _as_float(weekly_state.get("weekly_start_balance"), balance),
-                        last,
-                        cfg,
-                    )
+                    paused, reason = circuit_breaker.check_circuit_breaker(balance, _as_float(daily_state.get("daily_start_balance"), balance), _as_float(weekly_state.get("weekly_start_balance"), balance), last, cfg)
                 if paused:
-                    activity_log.push(symbol, "circuit_breaker", f"⛔ Bot pausado: {reason}")
+                    cb_status_text = f"paused: {reason}"
+                    activity_log.push(symbol, "circuit_breaker", f"CB paused: {reason}")
+                    _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": float(cfg.get("ml_threshold", 0.55)), "circuit_breaker": cb_status_text, "decision": "CB_PAUSED", "decision_reason": reason})
                     time.sleep(60)
                     continue
             features = {**feature_context}
             features["side_buy"] = 1.0 if signal == "LONG" else 0.0
-            features["supertrend_aligned_side"] = 1.0 if (
-                (features["side_buy"] >= 0.5 and _as_float(features.get("supertrend_direction")) > 0)
-                or (features["side_buy"] < 0.5 and _as_float(features.get("supertrend_direction")) < 0)
-            ) else 0.0
+            features["supertrend_aligned_side"] = 1.0 if ((features["side_buy"] >= 0.5 and _as_float(features.get("supertrend_direction")) > 0) or (features["side_buy"] < 0.5 and _as_float(features.get("supertrend_direction")) < 0)) else 0.0
             features["regime_code"] = {"TREND": 1.0, "RANGE": -1.0, "VOLATILE": 2.0, "MIXED": 0.0}.get(regime_name, 0.0)
             confidence = _ml_confidence(features, symbol)
             ml_threshold = float(cfg.get("ml_threshold", 0.55))
@@ -1125,25 +1264,25 @@ def run_symbol(symbol, cfg, shared_stop_event):
             if ML_THRESHOLD_OVERRIDE not in (None, ""):
                 ml_threshold = float(ML_THRESHOLD_OVERRIDE)
             elif ml_ready:
-                ml_threshold = max(float(ml_info.get("suggested_threshold", cfg["ml_threshold"])), _regime_threshold(regime_name, cfg))
+                regime_floor = _regime_threshold("TREND", cfg) + 0.05 if signal_meta.get("mixed_fallback") else _regime_threshold(regime_name, cfg)
+                ml_threshold = max(float(ml_info.get("suggested_threshold", cfg["ml_threshold"])), min(0.70, regime_floor))
             else:
                 ml_threshold = float(cfg["ml_threshold"])
-                not_ready_reason = str(ml_info.get("not_ready_reason") or "gates de validación no cumplidas")
+                not_ready_reason = str(ml_info.get("not_ready_reason") or "gates de validacion no cumplidas")
                 if _ML_NOT_READY_STATE.get(symbol) != not_ready_reason:
-                    activity_log.push(symbol, "ml", f"Modelo no listo: {not_ready_reason}; usando heurística cfg")
+                    activity_log.push(symbol, "ml", f"Modelo no listo: {not_ready_reason}; usando heuristica cfg")
                     _ML_NOT_READY_STATE[symbol] = not_ready_reason
             if ml_ready:
                 _ML_NOT_READY_STATE.pop(symbol, None)
-                activity_log.push(symbol, "ml", f"ML confianza: {confidence:.0%} (umbral {ml_threshold:.2f}) {'señal aceptada' if confidence >= ml_threshold else 'señal rechazada'}")
-            else:
-                activity_log.push(symbol, "ml", f"ML warming: proba={confidence:.0%} | gate inactivo | cfg={ml_threshold:.2f}")
             state = _portfolio_state()
             state = _calc_portfolio_risk(balance, state)
             _save_portfolio_state(state)
             if signal == "NEUTRAL":
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "SALTAR", "decision_reason": signal_meta.get("reason") or "sin se?al v?lida"})
                 time.sleep(60)
                 continue
             if confidence < ml_threshold and ml_ready:
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason": f"meta-modelo {confidence:.0%} < {ml_threshold:.2f}"})
                 time.sleep(60)
                 continue
             price = _as_float(last.get("close"))
@@ -1159,17 +1298,21 @@ def run_symbol(symbol, cfg, shared_stop_event):
             risk_pct = (qty_preview * atr_stop_distance) / balance * 100 if balance > 0 else 0.0
             projected = state.get("total_risk_pct", 0.0) + risk_pct
             if projected > float(cfg.get("daily_risk_cap", 5.0)):
-                activity_log.push("PORTFOLIO", "risk", "Límite de riesgo del portafolio alcanzado — nueva posición bloqueada")
+                activity_log.push("PORTFOLIO", "risk", "Limite de riesgo del portafolio alcanzado - nueva posicion bloqueada")
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason": f"riesgo proyectado {projected:.2f}% > cap {float(cfg.get('daily_risk_cap', 5.0)):.2f}%"})
                 time.sleep(60)
                 continue
             _open_trade(symbol, signal, last, primary_df, cfg, balance, trade_usdt, strategy_kind=strategy_kind, regime_name=regime_name)
+            _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": ml_ready, "ml_confidence": confidence, "ml_threshold_used": ml_threshold, "circuit_breaker": cb_status_text, "decision": "ABRIR", "decision_reason": signal_meta.get("reason") or "se?al confirmada"})
         except Exception as exc:
             logger.exception("Symbol loop error for %s", symbol)
             activity_log.push(symbol, "error", f"Error: {exc}")
+            _log_decision(symbol, {"regime": "N/A", "strategy_used": "none", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": float(cfg.get("ml_threshold", 0.55)), "circuit_breaker": "active", "decision": "SALTAR", "decision_reason": f"error: {exc}"})
         time.sleep(60)
 
 
 def main():
+    base_cfg = _get_symbol_config("BTCUSDT")
     stream_pairs = []
     for symbol in SYMBOLS:
         cfg = _get_symbol_config(symbol)
@@ -1177,6 +1320,8 @@ def main():
         stream_pairs.append((symbol, cfg["confirmation_timeframe"]))
     market_stream.start(stream_pairs)
     reconcile_state()
+    _emit_startup_diagnostics("BTCUSDT", base_cfg)
+    _ensure_ml_bootstrapped("BTCUSDT", base_cfg)
     threads = []
     for symbol in SYMBOLS:
         cfg = _get_symbol_config(symbol)
@@ -1186,10 +1331,16 @@ def main():
         logger.info("Started thread for %s", symbol)
     try:
         last_reconcile = time.time()
+        last_watchdog = time.time()
+        watchdog_sec = max(3600.0, float(base_cfg.get("ml_watchdog_hours", 24.0)) * 3600.0)
         while True:
-            if time.time() - last_reconcile >= 60:
+            now = time.time()
+            if now - last_reconcile >= 60:
                 reconcile_state()
-                last_reconcile = time.time()
+                last_reconcile = now
+            if now - last_watchdog >= watchdog_sec:
+                _ensure_ml_bootstrapped("BTCUSDT", _get_symbol_config("BTCUSDT"))
+                last_watchdog = now
             for thread in threads:
                 thread.join(timeout=0.5)
     except KeyboardInterrupt:

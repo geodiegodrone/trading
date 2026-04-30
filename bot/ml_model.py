@@ -45,6 +45,11 @@ ATR_MULT = float(os.getenv("ML_ATR_MULT", "1.5"))
 TP_RATIO = float(os.getenv("ML_TP_RATIO", "2.0"))
 
 
+def _model_path(symbol: Optional[str] = "BTCUSDT") -> Path:
+    _normalize_symbol(symbol)
+    return MODEL_PATH
+
+
 def _normalize_symbol(symbol: Optional[str]) -> str:
     return "BTCUSDT"
 
