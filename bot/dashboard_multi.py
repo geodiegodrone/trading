@@ -15,11 +15,13 @@ from fastapi.responses import HTMLResponse
 import activity_log
 import binance_broker
 import circuit_breaker
+import historical_data
 import market_stream
 from bot_config import get_symbol_config, parse_symbols
 from features import build_features
 import ml_model
 import regime as regime_detector
+import search_loop
 from strategies import signal_breakout, signal_meanrev, signal_trend, volume_filter_passes
 import trade_log
 
@@ -35,6 +37,7 @@ OPEN_TRADE_FILE = ROOT / "open_trade_id.json"
 
 SYMBOLS = ["BTCUSDT"]
 TAB_SYMBOLS = ["BTCUSDT"]
+HISTORY_TIMEFRAMES = [5, 15, 60, 240]
 CHART_TIMEFRAMES = {
     "1m": 1,
     "5m": 5,
@@ -914,6 +917,88 @@ def _ml_info_payload():
     return info
 
 
+def _history_payload():
+    rows = []
+    for timeframe in HISTORY_TIMEFRAMES:
+        rows.append(historical_data.history_metadata("BTCUSDT", timeframe))
+    return {
+        "symbol": "BTCUSDT",
+        "timeframes": rows,
+        "refresh_running": bool(_history_refresh_state.get("running")),
+        "refresh_started_at": _history_refresh_state.get("started_at"),
+        "last_error": _history_refresh_state.get("last_error"),
+        "last_result": _history_refresh_state.get("last_result"),
+    }
+
+
+def _search_payload():
+    status = dict(search_loop.load_search_status())
+    gate = dict(search_loop.load_live_gate())
+    status["live_gate"] = gate
+    status["search_log_tail"] = []
+    if search_loop.SEARCH_LOG_PATH.exists():
+        try:
+            lines = [json.loads(line) for line in search_loop.SEARCH_LOG_PATH.read_text(encoding="utf-8").splitlines() if line.strip()]
+            status["search_log_tail"] = lines[-10:]
+        except Exception:
+            logger.exception("Failed to read search log tail")
+    return status
+
+
+def _live_gate_payload():
+    return dict(search_loop.load_live_gate())
+
+
+def _start_history_refresh(days: int = 730):
+    if _history_refresh_state.get("running"):
+        return False
+
+    def _worker():
+        _history_refresh_state["running"] = True
+        _history_refresh_state["started_at"] = datetime.now(timezone.utc).isoformat()
+        _history_refresh_state["last_error"] = None
+        try:
+            results = []
+            for timeframe in HISTORY_TIMEFRAMES:
+                results.append(historical_data.download_history("BTCUSDT", timeframe, days, force=False))
+            _history_refresh_state["last_result"] = {"timeframes": results, "completed_at": datetime.now(timezone.utc).isoformat()}
+            summary = ", ".join([f"{int(row['timeframe'])}m={int(row['rows'])}" for row in results])
+            activity_log.push("BTCUSDT", "history", f"Hist?rico actualizado: {summary}")
+            _history_refresh_state["last_error"] = str(exc)
+            logger.exception("History refresh failed")
+            activity_log.push("BTCUSDT", "history", f"Error actualizando hist?rico: {exc}")
+        finally:
+            _history_refresh_state["running"] = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return True
+
+
+def _start_search_run(budget: int = 10, base_days: int = 730):
+    status = search_loop.load_search_status()
+    if bool(status.get("running")) or _search_run_state.get("running"):
+        return False
+
+    def _worker():
+        _search_run_state["running"] = True
+        _search_run_state["started_at"] = datetime.now(timezone.utc).isoformat()
+        _search_run_state["last_error"] = None
+        try:
+            activity_log.push("BTCUSDT", "search", f"Loop de b?squeda iniciado budget={budget} base_days={base_days}")
+            result = search_loop.run_search(budget=budget, base_days=base_days, symbol="BTCUSDT")
+            _search_run_state["last_result"] = result
+            activity_log.push("BTCUSDT", "search", f"B?squeda finalizada: ready_for_live={bool(result.get('ready_for_live'))} exhausted={bool(result.get('exhausted'))}")
+        except Exception as exc:
+            _search_run_state["last_error"] = str(exc)
+            logger.exception("Search loop failed")
+            activity_log.push("BTCUSDT", "search", f"Error en b?squeda de edge: {exc}")
+        finally:
+            _search_run_state["running"] = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return True
+
+
 def _start_ml_retrain():
     if _ml_retrain_state.get("running"):
         return False
@@ -955,6 +1040,8 @@ _cache: dict = {}
 _health_cache: dict = {"report": None}
 _recovery_cache: dict = {"report": None}
 _auto_recovery_state: dict = {"last_ts": 0.0}
+_history_refresh_state: dict = {"running": False, "started_at": None, "last_error": None, "last_result": None}
+_search_run_state: dict = {"running": False, "started_at": None, "last_error": None, "last_result": None}
 _ml_retrain_state: dict = {"running": False, "started_at": None, "last_error": None, "last_result": None}
 
 
@@ -1261,6 +1348,31 @@ async def api_ml_retrain():
 @app.get("/api/loop/status")
 async def api_loop_status():
     return activity_log.get_recent(50, event_type="loop")
+
+
+@app.get("/api/history")
+async def api_history():
+    return await asyncio.to_thread(_history_payload)
+
+
+@app.post("/api/history/refresh")
+async def api_history_refresh():
+    return {"started": _start_history_refresh()}
+
+
+@app.get("/api/search")
+async def api_search():
+    return await asyncio.to_thread(_search_payload)
+
+
+@app.post("/api/search/run")
+async def api_search_run():
+    return {"started": _start_search_run()}
+
+
+@app.get("/api/live-gate")
+async def api_live_gate():
+    return await asyncio.to_thread(_live_gate_payload)
 
 
 @app.websocket("/ws/portfolio")

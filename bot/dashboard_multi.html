@@ -2054,6 +2054,9 @@
       portfolio: null,
       agents: null,
       mlInfo: null,
+      historyInfo: null,
+      searchInfo: null,
+      liveGate: null,
       loopReasons: {},
       symbols: Object.fromEntries(SYMBOLS.map((s) => [s, { snapshot: null, chart: null, chartTimeframe: '1d', chartSnapshot: null }]))
     };
@@ -2178,6 +2181,26 @@
                 <div class="kpi-sub" id="${id(symbol,'kpiMlMeta')}">--</div>
                 <div class="kpi-sub" id="${id(symbol,'kpiMlReasons')}">--</div>
                 <button type="button" class="pill action" id="${id(symbol,'mlRetrainBtn')}" style="width:max-content; margin-top:10px;">Reentrenar ahora</button>
+              </div>
+              <div class="kpi-card">
+                <div class="kpi-label">${labelWithInfo('Data histórica', 'Estado del histórico local BTCUSDT por timeframe: velas, rango temporal, gaps y tamaño parquet.')}</div>
+                <div class="kpi-value" id="${id(symbol,'kpiHistoryStatus')}">--</div>
+                <div class="kpi-sub" id="${id(symbol,'kpiHistoryRows')}">--</div>
+                <div class="kpi-sub" id="${id(symbol,'kpiHistoryDetail')}">--</div>
+                <button type="button" class="pill action" id="${id(symbol,'historyRefreshBtn')}" style="width:max-content; margin-top:10px;">Actualizar</button>
+              </div>
+              <div class="kpi-card">
+                <div class="kpi-label">${labelWithInfo('Búsqueda de edge', 'Loop finito de búsqueda con search/valid/holdout. No habilita live si no demuestra edge robusto.')}</div>
+                <div class="kpi-value" id="${id(symbol,'kpiSearchStatus')}">--</div>
+                <div class="kpi-sub" id="${id(symbol,'kpiSearchHint')}">--</div>
+                <div class="kpi-sub" id="${id(symbol,'kpiSearchBest')}">--</div>
+                <button type="button" class="pill action" id="${id(symbol,'searchRunBtn')}" style="width:max-content; margin-top:10px;">Lanzar búsqueda</button>
+              </div>
+              <div class="kpi-card">
+                <div class="kpi-label">${labelWithInfo('Live gate', 'Permiso final para operar solo si la config pasa validación y holdout sin sobreajuste.')}</div>
+                <div class="kpi-value" id="${id(symbol,'kpiLiveGate')}">--</div>
+                <div class="kpi-sub" id="${id(symbol,'kpiLiveGateHint')}">--</div>
+                <div class="kpi-sub" id="${id(symbol,'kpiLiveGateMetrics')}">--</div>
               </div>
               <div class="kpi-card">
                 <div class="kpi-label">${labelWithInfo('Listo para operar', 'Indica si el bot puede abrir una posición ahora mismo y por qué está bloqueado si no puede.')}</div>
@@ -2755,6 +2778,14 @@
         if (btn) {
           btn.addEventListener('click', () => triggerMlRetrain(symbol));
         }
+        const historyBtn = document.getElementById(id(symbol, 'historyRefreshBtn'));
+        if (historyBtn) {
+          historyBtn.addEventListener('click', refreshHistory);
+        }
+        const searchBtn = document.getElementById(id(symbol, 'searchRunBtn'));
+        if (searchBtn) {
+          searchBtn.addEventListener('click', triggerSearchRun);
+        }
       });
     }
 
@@ -3207,6 +3238,121 @@
       }
     }
 
+    function renderHistoryInfo() {
+      const symbol = 'BTCUSDT';
+      const payload = state.historyInfo || {};
+      const rows = Array.isArray(payload?.timeframes) ? payload.timeframes : [];
+      const row60 = rows.find((row) => Number(row?.timeframe) === 60) || rows[0] || {};
+      const totalRows = rows.reduce((acc, row) => acc + Number(row?.rows || 0), 0);
+      setText(symbol, 'kpiHistoryStatus', payload?.refresh_running ? 'ACTUALIZANDO...' : rows.length ? 'SINCRONIZADO' : 'SIN DATOS');
+      setText(symbol, 'kpiHistoryRows', rows.length ? `1h=${Number(row60?.rows || 0).toLocaleString('en-US')} | total=${totalRows.toLocaleString('en-US')}` : '--');
+      const detail = rows.length
+        ? rows.map((row) => `${row.timeframe}m ${row.gaps} gaps ${Number(row.size_mb || 0).toFixed(2)}MB`).join(' | ')
+        : (payload?.last_error || '--');
+      setText(symbol, 'kpiHistoryDetail', detail);
+      const btn = document.getElementById(id(symbol, 'historyRefreshBtn'));
+      if (btn) {
+        btn.disabled = Boolean(payload?.refresh_running);
+        btn.textContent = payload?.refresh_running ? 'Actualizando...' : 'Actualizar';
+      }
+      const valueEl = document.getElementById(id(symbol, 'kpiHistoryStatus'));
+      if (valueEl) valueEl.style.color = payload?.refresh_running ? 'var(--yellow)' : rows.length ? 'var(--green)' : 'var(--red)';
+    }
+
+    async function refreshHistory() {
+      try {
+        const res = await fetch('/api/history/refresh', { method: 'POST' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await fetchHistoryInfo();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function fetchHistoryInfo() {
+      try {
+        const res = await fetch('/api/history', { method: 'GET' });
+        if (!res.ok) return;
+        state.historyInfo = await res.json();
+        renderHistoryInfo();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function renderSearchInfo() {
+      const symbol = 'BTCUSDT';
+      const payload = state.searchInfo || {};
+      const liveGate = payload?.live_gate || state.liveGate || {};
+      const bestCfg = payload?.best_config || liveGate?.best_config || {};
+      const bestSharpe = Number(payload?.best_valid_sharpe ?? liveGate?.best_metrics?.median_fold_sharpe ?? 0);
+      const bestPf = Number(payload?.best_pf ?? liveGate?.best_metrics?.profit_factor ?? 0);
+      const iterCurrent = Number(payload?.iter_current || 0);
+      const budget = Number(payload?.budget || 0);
+      const status = String(payload?.status || 'idle').toUpperCase();
+      setText(symbol, 'kpiSearchStatus', status);
+      setText(symbol, 'kpiSearchHint', `iter ${iterCurrent}/${budget || 10} | ${payload?.message || '--'}`);
+      setText(symbol, 'kpiSearchBest', `best=${bestCfg?.name || '--'} | sharpe=${bestSharpe.toFixed(2)} | pf=${bestPf.toFixed(2)}`);
+      const btn = document.getElementById(id(symbol, 'searchRunBtn'));
+      if (btn) {
+        const running = Boolean(payload?.running);
+        btn.disabled = running;
+        btn.textContent = running ? 'Buscando...' : 'Lanzar búsqueda';
+      }
+      const valueEl = document.getElementById(id(symbol, 'kpiSearchStatus'));
+      if (valueEl) valueEl.style.color = payload?.running ? 'var(--yellow)' : status === 'READY_FOR_LIVE' ? 'var(--green)' : status === 'EXHAUSTED' ? 'var(--red)' : 'var(--text)';
+    }
+
+    async function triggerSearchRun() {
+      try {
+        const res = await fetch('/api/search/run', { method: 'POST' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await fetchSearchInfo();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function fetchSearchInfo() {
+      try {
+        const res = await fetch('/api/search', { method: 'GET' });
+        if (!res.ok) return;
+        state.searchInfo = await res.json();
+        renderSearchInfo();
+        renderLiveGate();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function renderLiveGate() {
+      const symbol = 'BTCUSDT';
+      const payload = state.liveGate || state.searchInfo?.live_gate || {};
+      const ready = Boolean(payload?.ready_for_live);
+      const exhausted = Boolean(payload?.exhausted);
+      const holdout = payload?.holdout_metrics || {};
+      const best = payload?.best_metrics || {};
+      setText(symbol, 'kpiLiveGate', ready ? 'READY FOR LIVE' : 'TRADING DESHABILITADO');
+      setText(symbol, 'kpiLiveGateHint', ready ? `sealed=${payload?.sealed_at || '--'}` : String(payload?.reason || payload?.recommendation || 'Sin edge demostrado'));
+      const metrics = ready
+        ? `holdout sharpe=${Number(holdout?.median_fold_sharpe || 0).toFixed(2)} | pf=${Number(holdout?.profit_factor || 0).toFixed(2)} | dd=${Number(holdout?.max_drawdown_pct || 0).toFixed(2)}%`
+        : `best sharpe=${Number(best?.median_fold_sharpe || 0).toFixed(2)} | pf=${Number(best?.profit_factor || 0).toFixed(2)} | exhausted=${exhausted}`;
+      setText(symbol, 'kpiLiveGateMetrics', metrics);
+      const valueEl = document.getElementById(id(symbol, 'kpiLiveGate'));
+      if (valueEl) valueEl.style.color = ready ? 'var(--green)' : 'var(--red)';
+    }
+
+    async function fetchLiveGate() {
+      try {
+        const res = await fetch('/api/live-gate', { method: 'GET' });
+        if (!res.ok) return;
+        state.liveGate = await res.json();
+        renderLiveGate();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
     function pushLog(symbol, snapshot) {
       updateActivity({
         symbol: shortSymbol(symbol),
@@ -3587,9 +3733,15 @@
     switchTab('portfolio');
     loadLatestHealthCheck();
     refreshMlInfo();
+    fetchHistoryInfo();
+    fetchSearchInfo();
+    fetchLiveGate();
     refreshLoopStatus();
     setInterval(loadLatestHealthCheck, 300000);
     setInterval(refreshMlInfo, 5000);
+    setInterval(fetchHistoryInfo, 15000);
+    setInterval(fetchSearchInfo, 5000);
+    setInterval(fetchLiveGate, 5000);
     setInterval(refreshLoopStatus, 5000);
   </script>
 </body>
