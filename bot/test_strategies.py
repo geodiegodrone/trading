@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from bot_config import DEFAULT_CONFIG
-from strategies import signal_breakout, signal_meanrev, signal_trend, volume_filter_passes
+from strategies import signal_breakout, signal_meanrev, signal_trend, signal_vol_meanrev, volume_filter_passes
 
 
 def test_trend() -> None:
@@ -58,10 +58,54 @@ def test_volume_filter_breakout_low_volume_blocks() -> None:
     assert passed is False
 
 
+def test_vol_meanrev_long_signal() -> None:
+    rows = []
+    for i in range(80):
+        close = 100.0 + (i * 0.1)
+        rows.append(
+            {
+                "open": close - 0.1,
+                "high": close + 0.3,
+                "low": close - 0.3,
+                "close": close,
+                "volume": 100 + i,
+                "ema200": 100.0,
+                "rsi": 45.0,
+                "atr_pct_zscore_50": 0.2,
+            }
+        )
+    rows[-1].update({"close": 88.0, "open": 97.0, "high": 98.0, "low": 87.0, "rsi": 20.0, "atr_pct_zscore_50": 2.0, "ema200": 100.0})
+    df = pd.DataFrame(rows)
+    assert signal_vol_meanrev(df, DEFAULT_CONFIG) == "LONG"
+
+
+def test_vol_meanrev_short_signal() -> None:
+    rows = []
+    for i in range(80):
+        close = 100.0 - (i * 0.05)
+        rows.append(
+            {
+                "open": close - 0.1,
+                "high": close + 0.3,
+                "low": close - 0.3,
+                "close": close,
+                "volume": 100 + i,
+                "ema200": 100.0,
+                "rsi": 55.0,
+                "atr_pct_zscore_50": 0.2,
+            }
+        )
+    rows[-1].update({"close": 112.0, "open": 103.0, "high": 113.0, "low": 102.0, "rsi": 80.0, "atr_pct_zscore_50": 2.0, "ema200": 100.0})
+    df = pd.DataFrame(rows)
+    assert signal_vol_meanrev(df, DEFAULT_CONFIG) == "SHORT"
+
+
 if __name__ == "__main__":
     test_trend()
     test_meanrev()
     test_breakout()
     test_volume_filter_trending_low_volume_passes()
     test_volume_filter_breakout_low_volume_blocks()
+    test_vol_meanrev_long_signal()
+    test_vol_meanrev_short_signal()
     print("test_strategies_ok")

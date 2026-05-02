@@ -2190,14 +2190,13 @@
                 <button type="button" class="pill action" id="${id(symbol,'historyRefreshBtn')}" style="width:max-content; margin-top:10px;">Actualizar</button>
               </div>
               <div class="kpi-card">
-                <div class="kpi-label">${labelWithInfo('Búsqueda de edge', 'Loop finito de búsqueda con search/valid/holdout. No habilita live si no demuestra edge robusto.')}</div>
+                <div class="kpi-label">${labelWithInfo('Modo', 'Decisión operativa actual: observación, ML fuera del path crítico, un solo setup y riesgo mínimo.')}</div>
                 <div class="kpi-value" id="${id(symbol,'kpiSearchStatus')}">--</div>
                 <div class="kpi-sub" id="${id(symbol,'kpiSearchHint')}">--</div>
                 <div class="kpi-sub" id="${id(symbol,'kpiSearchBest')}">--</div>
-                <button type="button" class="pill action" id="${id(symbol,'searchRunBtn')}" style="width:max-content; margin-top:10px;">Lanzar búsqueda</button>
               </div>
               <div class="kpi-card">
-                <div class="kpi-label">${labelWithInfo('Live gate', 'Permiso final para operar solo si la config pasa validación y holdout sin sobreajuste.')}</div>
+                <div class="kpi-label">${labelWithInfo('Kill criterion', 'Veredicto automático a 90 días: si el setup no demuestra edge suficiente, el bot se apaga solo.')}</div>
                 <div class="kpi-value" id="${id(symbol,'kpiLiveGate')}">--</div>
                 <div class="kpi-sub" id="${id(symbol,'kpiLiveGateHint')}">--</div>
                 <div class="kpi-sub" id="${id(symbol,'kpiLiveGateMetrics')}">--</div>
@@ -2244,7 +2243,7 @@
                 <div class="indicator-label">${labelWithInfo('Riesgo diario', 'Porcentaje del límite diario de pérdida ya consumido hoy.')}</div>
                 <div class="indicator-value" id="${id(symbol,'indDailyRisk')}">--</div>
                 <div class="indicator-progress"><div id="${id(symbol,'indDailyRiskBar')}"></div></div>
-                <div class="indicator-sub">Límite diario del 3%</div>
+                <div class="indicator-sub" id="${id(symbol,'indDailyRiskSub')}">Límite diario del 0.5%</div>
               </div>
               <div class="indicator-card">
                 <div class="indicator-label">${labelWithInfo('Tamaño Kelly', 'Fracción de tamaño calculada con Half-Kelly según el historial.')}</div>
@@ -2957,7 +2956,24 @@
       if (mlBtn) {
         mlBtn.disabled = retraining;
         mlBtn.textContent = retraining ? '? Reentrenando...' : 'Reentrenar ahora';
+        mlBtn.style.display = 'none';
       }
+      const modeLabel = String(kpis?.mode_label || 'OBSERVATION');
+      const modeDetail = String(kpis?.mode_detail || 'ML off, vol-meanrev only, 0.15% risk');
+      const modeDemoOnly = Boolean(kpis?.mode_demo_only);
+      setText(symbol, 'kpiSearchStatus', modeLabel);
+      setText(symbol, 'kpiSearchHint', modeDetail);
+      setText(symbol, 'kpiSearchBest', `demo_only=${modeDemoOnly} | 1 trade/día UTC | daily cap 0.5%`);
+      const modeEl = document.getElementById(id(symbol, 'kpiSearchStatus'));
+      if (modeEl) modeEl.style.color = 'var(--yellow)';
+      const kill = kpis?.kill_status || {};
+      const killMetrics = kill?.metrics || {};
+      const dayLabel = `${Number(kill?.days_running || 0)}/${Number(kill?.days_required || 90)}`;
+      setText(symbol, 'kpiLiveGate', Boolean(kill?.killed) ? 'APAGADO' : `DÍA ${dayLabel}`);
+      setText(symbol, 'kpiLiveGateHint', Boolean(kill?.killed) ? String(kill?.kill_reason || 'KILL.flag presente') : `ETA ${Number(kill?.eta_days || 0)} día(s) | next=${kill?.next_eval_at || '--'}`);
+      setText(symbol, 'kpiLiveGateMetrics', `sharpe=${Number(killMetrics?.sharpe ?? 0).toFixed(2)} | pf=${Number(killMetrics?.profit_factor ?? 0).toFixed(2)} | trades=${Number(killMetrics?.total_trades ?? 0)} | expR=${Number(killMetrics?.expectancy_R ?? 0).toFixed(2)}`);
+      const killEl = document.getElementById(id(symbol, 'kpiLiveGate'));
+      if (killEl) killEl.style.color = Boolean(kill?.killed) ? 'var(--red)' : 'var(--green)';
       setText(symbol, 'kpiStats', hasClosedTrades ? `${statsWinRate.toFixed(1)}%` : '--');
       document.getElementById(id(symbol, 'kpiStats')).style.color = statsWinRate >= 60 ? 'var(--green)' : statsWinRate >= 40 ? 'var(--yellow)' : 'var(--red)';
       setText(symbol, 'kpiStatsHint', hasClosedTrades ? `${statsTotal} reales (${reconciledCount} reconcil.) | ${statsWins}W ${statsLosses}L | R ${statsAvgR.toFixed(2)} / ${statsBestR.toFixed(2)} / ${statsWorstR.toFixed(2)}` : 'Sin historial cerrado todavía');
@@ -2987,6 +3003,7 @@
       const volEl = document.getElementById(id(symbol, 'indVolume'));
       const volSub = document.getElementById(id(symbol, 'indVolumeSub'));
       const riskEl = document.getElementById(id(symbol, 'indDailyRisk'));
+      const riskSub = document.getElementById(id(symbol, 'indDailyRiskSub'));
       const riskBar = document.getElementById(id(symbol, 'indDailyRiskBar'));
       const kellyEl = document.getElementById(id(symbol, 'indKelly'));
       if (regEl) {
@@ -3002,8 +3019,8 @@
         stEl.style.color = supertrendDir === 1 ? 'var(--green)' : supertrendDir === -1 ? 'var(--red)' : 'var(--muted)';
       }
       if (volEl) {
-        volEl.textContent = volumePass ? 'PASA' : 'BLOQUEA';
-        volEl.style.color = volumePass ? 'var(--green)' : 'var(--red)';
+        volEl.textContent = volumeRule === 'N/A' ? 'N/A' : volumePass ? 'PASA' : 'BLOQUEA';
+        volEl.style.color = volumeRule === 'N/A' ? 'var(--yellow)' : volumePass ? 'var(--green)' : 'var(--red)';
       }
       if (volSub) {
         volSub.textContent = `q ${volumeQuantile.toFixed(2)} | z ${volumeZ.toFixed(2)} | ${volumeRule} | ${volumeReason || `ratio ${formatNum(volumeRatio)} | ATR ${formatNum(atr)}`}`;
@@ -3016,6 +3033,10 @@
           pct >= 100 ? 'linear-gradient(90deg, #f87171, #ef4444)' :
           pct >= 66 ? 'linear-gradient(90deg, #fbbf24, #f59e0b)' :
           'linear-gradient(90deg, #36d399, #10b981)';
+      }
+      if (riskSub) {
+        const riskCap = Number(indicators?.daily_risk_cap ?? 0.5);
+        riskSub.textContent = `Límite diario del ${riskCap.toFixed(1)}%`;
       }
       if (kellyEl) {
         kellyEl.textContent = `${(kellyFraction * 100).toFixed(1)}%`;
@@ -3212,7 +3233,11 @@
         if (Array.isArray(payload) && payload.length) {
           updateActivity(payload);
           const reasonsBySymbol = {};
+          const lastStartupIndex = payload.reduce((found, entry, index) => (
+            String(entry?.type || '').toLowerCase() === 'startup' ? index : found
+          ), -1);
           payload
+            .slice(lastStartupIndex >= 0 ? lastStartupIndex + 1 : 0)
             .filter((entry) => String(entry?.type || '').toLowerCase() === 'loop')
             .slice(-10)
             .forEach((entry) => {
@@ -3281,76 +3306,23 @@
     }
 
     function renderSearchInfo() {
-      const symbol = 'BTCUSDT';
-      const payload = state.searchInfo || {};
-      const liveGate = payload?.live_gate || state.liveGate || {};
-      const bestCfg = payload?.best_config || liveGate?.best_config || {};
-      const bestSharpe = Number(payload?.best_valid_sharpe ?? liveGate?.best_metrics?.median_fold_sharpe ?? 0);
-      const bestPf = Number(payload?.best_pf ?? liveGate?.best_metrics?.profit_factor ?? 0);
-      const iterCurrent = Number(payload?.iter_current || 0);
-      const budget = Number(payload?.budget || 0);
-      const status = String(payload?.status || 'idle').toUpperCase();
-      setText(symbol, 'kpiSearchStatus', status);
-      setText(symbol, 'kpiSearchHint', `iter ${iterCurrent}/${budget || 10} | ${payload?.message || '--'}`);
-      setText(symbol, 'kpiSearchBest', `best=${bestCfg?.name || '--'} | sharpe=${bestSharpe.toFixed(2)} | pf=${bestPf.toFixed(2)}`);
-      const btn = document.getElementById(id(symbol, 'searchRunBtn'));
-      if (btn) {
-        const running = Boolean(payload?.running);
-        btn.disabled = running;
-        btn.textContent = running ? 'Buscando...' : 'Lanzar búsqueda';
-      }
-      const valueEl = document.getElementById(id(symbol, 'kpiSearchStatus'));
-      if (valueEl) valueEl.style.color = payload?.running ? 'var(--yellow)' : status === 'READY_FOR_LIVE' ? 'var(--green)' : status === 'EXHAUSTED' ? 'var(--red)' : 'var(--text)';
+      return;
     }
 
     async function triggerSearchRun() {
-      try {
-        const res = await fetch('/api/search/run', { method: 'POST' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        await fetchSearchInfo();
-      } catch (err) {
-        console.error(err);
-      }
+      return;
     }
 
     async function fetchSearchInfo() {
-      try {
-        const res = await fetch('/api/search', { method: 'GET' });
-        if (!res.ok) return;
-        state.searchInfo = await res.json();
-        renderSearchInfo();
-        renderLiveGate();
-      } catch (err) {
-        console.error(err);
-      }
+      return;
     }
 
     function renderLiveGate() {
-      const symbol = 'BTCUSDT';
-      const payload = state.liveGate || state.searchInfo?.live_gate || {};
-      const ready = Boolean(payload?.ready_for_live);
-      const exhausted = Boolean(payload?.exhausted);
-      const holdout = payload?.holdout_metrics || {};
-      const best = payload?.best_metrics || {};
-      setText(symbol, 'kpiLiveGate', ready ? 'READY FOR LIVE' : 'TRADING DESHABILITADO');
-      setText(symbol, 'kpiLiveGateHint', ready ? `sealed=${payload?.sealed_at || '--'}` : String(payload?.reason || payload?.recommendation || 'Sin edge demostrado'));
-      const metrics = ready
-        ? `holdout sharpe=${Number(holdout?.median_fold_sharpe || 0).toFixed(2)} | pf=${Number(holdout?.profit_factor || 0).toFixed(2)} | dd=${Number(holdout?.max_drawdown_pct || 0).toFixed(2)}%`
-        : `best sharpe=${Number(best?.median_fold_sharpe || 0).toFixed(2)} | pf=${Number(best?.profit_factor || 0).toFixed(2)} | exhausted=${exhausted}`;
-      setText(symbol, 'kpiLiveGateMetrics', metrics);
-      const valueEl = document.getElementById(id(symbol, 'kpiLiveGate'));
-      if (valueEl) valueEl.style.color = ready ? 'var(--green)' : 'var(--red)';
+      return;
     }
 
     async function fetchLiveGate() {
-      try {
-        const res = await fetch('/api/live-gate', { method: 'GET' });
-        if (!res.ok) return;
-        state.liveGate = await res.json();
-        renderLiveGate();
-      } catch (err) {
-        console.error(err);
-      }
+      return;
     }
 
     function pushLog(symbol, snapshot) {

@@ -258,10 +258,15 @@ def _profit_factor(r_values: Sequence[float]) -> float:
 def _drawdown_pct(r_values: Sequence[float]) -> float:
     if not r_values:
         return 0.0
-    equity = 1.0 + np.cumsum(np.asarray(r_values, dtype=float))
-    peaks = np.maximum.accumulate(equity)
-    drawdowns = np.where(peaks > 0, (peaks - equity) / peaks * 100.0, 0.0)
-    return float(drawdowns.max()) if len(drawdowns) else 0.0
+    current = 1.0
+    peak = 1.0
+    max_dd = 0.0
+    for value in np.asarray(r_values, dtype=float):
+        current += float(value)
+        peak = max(peak, current)
+        if peak > 1e-6:
+            max_dd = max(max_dd, ((peak - current) / peak) * 100.0)
+    return float(min(max(max_dd, 0.0), 100.0))
 
 
 def _metrics_fail(event_count: int = 0, label_balance: Dict[str, int] | None = None, reason: str = "insufficient_data") -> Dict[str, Any]:

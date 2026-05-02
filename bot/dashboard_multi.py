@@ -16,13 +16,14 @@ import activity_log
 import binance_broker
 import circuit_breaker
 import historical_data
+import kill_criterion
 import market_stream
 from bot_config import get_symbol_config, parse_symbols
 from features import build_features
 import ml_model
 import regime as regime_detector
 import search_loop
-from strategies import signal_breakout, signal_meanrev, signal_trend, volume_filter_passes
+from strategies import signal_breakout, signal_meanrev, signal_trend, signal_vol_meanrev, volume_filter_passes
 import trade_log
 
 ROOT = Path(__file__).resolve().parent
@@ -327,45 +328,14 @@ def _dashboard_strategy_state(df, cfg):
             "volume_reason": "sin datos",
             "volume_regime": "DEFAULT",
         }
-    last = df.iloc[-1].to_dict()
     regime_info = regime_detector.classify_regime(df)
-    mode = str(cfg.get("strategy_mode", "regime")).lower()
-    strategy_kind = mode
-    signal_reason = ""
-    if mode == "regime":
-        regime_name = str(regime_info.get("regime") or "MIXED").upper()
-        if regime_name in {"TREND", "TRENDING"}:
-            regime_name = "TRENDING"
-            strategy_kind = "trend"
-            signal = signal_trend(last, df, cfg)
-        elif regime_name == "RANGE":
-            strategy_kind = "meanrev"
-            signal = signal_meanrev(last, df, cfg)
-        elif regime_name == "VOLATILE":
-            strategy_kind = "meanrev"
-            signal_reason = "regime VOLATILE -> meanrev con riesgo reducido"
-            signal = signal_meanrev(last, df, cfg)
-        else:
-            regime_name = "MIXED"
-            strategy_kind = "breakout"
-            signal = signal_breakout(last, df, cfg)
-            signal_reason = "regime MIXED -> breakout"
-    elif mode == "meanrev":
-        regime_name = "RANGE"
-        strategy_kind = "meanrev"
-        signal = signal_meanrev(last, df, cfg)
-    elif mode == "breakout":
-        regime_name = "BREAKOUT"
-        strategy_kind = "breakout"
-        signal = signal_breakout(last, df, cfg)
-    else:
-        regime_name = "TRENDING"
-        strategy_kind = "trend"
-        signal = signal_trend(last, df, cfg)
-    volume_regime = _dashboard_volume_regime(strategy_kind, regime_name)
-    volume_cfg = dict(cfg)
-    volume_cfg["_signal_side"] = signal
-    volume_ok, volume_reason = volume_filter_passes(df, volume_regime, volume_cfg)
+    regime_name = str(regime_info.get("regime") or "MIXED").upper()
+    strategy_kind = "vol_meanrev"
+    signal = signal_vol_meanrev(df, cfg)
+    signal_reason = "volatility overshoot mean reversion"
+    volume_regime = "N/A"
+    volume_ok = True
+    volume_reason = "No aplica a este setup"
     return {
         "regime_name": regime_name,
         "strategy_kind": strategy_kind,
@@ -380,21 +350,22 @@ def _dashboard_strategy_state(df, cfg):
 def _trade_gate_state(last, df, cfg, position=None, ml_ready=False, ml_confidence=0.5, ml_info=None):
     if last is None:
         return {"status": "SIN DATOS", "reason": "Esperando velas suficientes", "ready": False}
+    live_gate = search_loop.load_live_gate()
+    kill_status = kill_criterion.status()
+    if bool(kill_status.get("killed")):
+        return {"status": "KILL", "reason": str(kill_status.get("kill_reason") or "KILL.flag presente"), "ready": False}
+    if not (bool(live_gate.get("ready_for_live")) or bool(live_gate.get("mode_demo_only"))):
+        reason = str(live_gate.get("reason") or live_gate.get("recommendation") or "mode_demo_only=false")
+        return {"status": "GATE OFF", "reason": reason, "ready": False}
     if position:
         return {"status": "POSICI?N ABIERTA", "reason": "Ya hay una operaci?n activa", "ready": False}
     signal_state = _dashboard_strategy_state(df, cfg)
     signal = signal_state["signal"]
     if signal == "NEUTRAL":
         return {"status": "ESPERANDO", "reason": signal_state.get("signal_reason") or "Sin confluencia de entrada", "ready": False}
-    if not signal_state["volume_ok"]:
-        return {"status": "ESPERANDO", "reason": signal_state["volume_reason"], "ready": False}
-    if not ml_ready:
-        reason = str((ml_info or {}).get("not_ready_reason") or "ML no listo")
-        return {"status": "PRIMARY ONLY", "reason": f"MODO PRIMARY (sin ML, half-size) | {reason}", "ready": True}
-    ml_threshold = float((ml_info or {}).get("suggested_threshold", cfg.get("ml_threshold", 0.55)))
-    if ml_confidence < ml_threshold:
-        return {"status": "FILTRADO", "reason": f"ML bajo umbral ({ml_confidence:.2f} < {ml_threshold:.2f})", "ready": False}
-    return {"status": "LISTO PARA OPERAR", "reason": f"Se?al {signal} confirmada por filtros", "ready": True}
+    if _daily_loss_pct(_get_balance()) >= float(cfg.get("daily_risk_cap", 0.5)):
+        return {"status": "ESPERANDO", "reason": f"Riesgo diario agotado {_daily_loss_pct(_get_balance()):.2f}% / {float(cfg.get('daily_risk_cap', 0.5)):.2f}%", "ready": False}
+    return {"status": "OBSERVATION", "reason": f"vol-meanrev activo | señal {signal} | riesgo 0.15%", "ready": True}
 
 
 def _health_issues_for_symbol(exchange_pos, local_pos, registry_trade_id, open_rows, exchange_error=None):
@@ -642,6 +613,8 @@ def _build_symbol_payload(symbol):
     position = position_snapshot.get("position")
     open_trades = 1 if position else 0
     balance = _get_balance()
+    live_gate = search_loop.load_live_gate()
+    kill_status = kill_criterion.status()
     stats = trade_log.get_stats(symbol)
     symbol_trades = trade_log.get_all_trades(symbol)
     try:
@@ -679,7 +652,7 @@ def _build_symbol_payload(symbol):
         except Exception:
             ml_confidence = 0.5
     signal_state = _dashboard_strategy_state(df, cfg)
-    primary_only_mode = not ml_ready
+    primary_only_mode = False
     kpis = {
         "balance": balance,
         "balance_start": 50000.0,
@@ -703,6 +676,10 @@ def _build_symbol_payload(symbol):
         "no_profitable_threshold": no_profitable_threshold,
         "primary_only_mode": primary_only_mode,
         "trade_stats": {**stats, "reconciled_count": int(stats.get("reconciled_count", stats.get("reconciled", 0) or 0))},
+        "mode_label": "OBSERVATION",
+        "mode_detail": "ML off, vol-meanrev only, 0.15% risk",
+        "mode_demo_only": bool(live_gate.get("mode_demo_only", False)),
+        "kill_status": kill_status,
     }
     kpis["pnl_total"] = kpis["pnl_realized"] + kpis["pnl_unrealized"]
     indicators = {
@@ -723,6 +700,7 @@ def _build_symbol_payload(symbol):
         "market_regime": signal_state.get("regime_name", "MIXED"),
         "daily_loss_pct": _daily_loss_pct(balance),
         "daily_risk_used": _daily_loss_pct(balance),
+        "daily_risk_cap": float(cfg.get("daily_risk_cap", 0.5)),
         "kelly_fraction": _kelly_fraction(),
         "primary_only_mode": primary_only_mode,
     }
@@ -758,6 +736,12 @@ def _build_symbol_payload(symbol):
             "not_ready_reason": str(ml_info.get("not_ready_reason") or ""),
             "no_profitable_threshold": bool(ml_info.get("no_profitable_threshold", False)),
         },
+        "mode": {
+            "label": "OBSERVATION",
+            "detail": "ML off, vol-meanrev only, 0.15% risk",
+            "mode_demo_only": bool(live_gate.get("mode_demo_only", False)),
+        },
+        "kill_criterion": kill_status,
         "circuit_breaker": cb_status,
         "last_candle": {
             "open": _as_float(last.get("open")),
@@ -790,6 +774,7 @@ def _build_symbol_payload(symbol):
         "volume_filter_reason": indicators["volume_filter_reason"],
         "daily_risk_pct": indicators["daily_loss_pct"],
         "daily_risk_used": indicators["daily_risk_used"],
+        "daily_risk_cap": indicators["daily_risk_cap"],
         "kelly_pct": indicators["kelly_fraction"] * 100.0,
         "indicators_snapshot": {
             "ema9": _as_float(last.get(cols.get("ema_fast", "ema9"))),
@@ -949,6 +934,10 @@ def _live_gate_payload():
     return dict(search_loop.load_live_gate())
 
 
+def _kill_payload():
+    return dict(kill_criterion.status())
+
+
 def _start_history_refresh(days: int = 730):
     if _history_refresh_state.get("running"):
         return False
@@ -963,10 +952,12 @@ def _start_history_refresh(days: int = 730):
                 results.append(historical_data.download_history("BTCUSDT", timeframe, days, force=False))
             _history_refresh_state["last_result"] = {"timeframes": results, "completed_at": datetime.now(timezone.utc).isoformat()}
             summary = ", ".join([f"{int(row['timeframe'])}m={int(row['rows'])}" for row in results])
-            activity_log.push("BTCUSDT", "history", f"Hist?rico actualizado: {summary}")
+            activity_log.push("BTCUSDT", "history", f"Histórico actualizado: {summary}")
+            _history_refresh_state["last_error"] = None
+        except Exception as exc:
             _history_refresh_state["last_error"] = str(exc)
             logger.exception("History refresh failed")
-            activity_log.push("BTCUSDT", "history", f"Error actualizando hist?rico: {exc}")
+            activity_log.push("BTCUSDT", "history", f"Error actualizando histórico: {exc}")
         finally:
             _history_refresh_state["running"] = False
 
@@ -1373,6 +1364,11 @@ async def api_search_run():
 @app.get("/api/live-gate")
 async def api_live_gate():
     return await asyncio.to_thread(_live_gate_payload)
+
+
+@app.get("/api/kill-criterion")
+async def api_kill_criterion():
+    return await asyncio.to_thread(_kill_payload)
 
 
 @app.websocket("/ws/portfolio")

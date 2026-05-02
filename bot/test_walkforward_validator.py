@@ -102,6 +102,11 @@ def test_walkforward_random_fails_gates(monkeypatch) -> None:
     assert metrics["profit_factor"] < 1.3 or metrics["val_auc"] < 0.55
 
 
+def test_drawdown_pct_is_capped_on_broken_equity_curve() -> None:
+    drawdown = walkforward_validator._drawdown_pct([1.0, -2.0, 1.0, 1.0])
+    assert 0.0 <= drawdown <= 100.0
+
+
 if __name__ == "__main__":
     from pytest import MonkeyPatch
 

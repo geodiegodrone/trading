@@ -32,5 +32,7 @@ __pycache__/
 /bot/search_log.jsonl
 /bot/search_status.json
 /bot/live_gate.json
+/bot/KILL.flag
+/bot/kill_criterion_log.json
 /bot/data/historical/*
 !/bot/data/historical/README.md

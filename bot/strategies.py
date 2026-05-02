@@ -151,6 +151,34 @@ def signal_breakout(last: Dict[str, Any], df: pd.DataFrame, cfg: Dict[str, Any])
     return "NEUTRAL"
 
 
+def signal_vol_meanrev(df: pd.DataFrame, cfg: Dict[str, Any] | None = None) -> str:
+    if df.empty or len(df) < 60:
+        return "NEUTRAL"
+    runtime_cfg = dict(cfg or {})
+    required = {"close", "ema200", "rsi", "atr_pct_zscore_50"}
+    frame = df.copy() if required.issubset(df.columns) else _feature_frame(df)
+    row = frame.iloc[-1]
+    close = _safe_float(row.get("close"))
+    ema200 = _safe_float(row.get("ema200"))
+    rsi = _safe_float(row.get("rsi"))
+    atr_z = _safe_float(row.get("atr_pct_zscore_50"))
+    return_1h = _safe_float(frame["close"].pct_change().iloc[-1] * 100.0)
+    return_mean = _safe_float(frame["close"].pct_change().mul(100.0).rolling(50).mean().iloc[-1])
+    return_std = _safe_float(frame["close"].pct_change().mul(100.0).rolling(50).std(ddof=0).iloc[-1])
+    return_z = (return_1h - return_mean) / return_std if return_std > 0 else 0.0
+    sigma = float(runtime_cfg.get("vol_meanrev_sigma", 2.5))
+    rsi_low = float(runtime_cfg.get("vol_meanrev_rsi_low", 25.0))
+    rsi_high = float(runtime_cfg.get("vol_meanrev_rsi_high", 75.0))
+    atr_z_min = float(runtime_cfg.get("vol_meanrev_atr_z", 1.5))
+    ema_floor = float(runtime_cfg.get("vol_meanrev_ema_floor", 0.85))
+    ema_ceiling = float(runtime_cfg.get("vol_meanrev_ema_ceiling", 1.15))
+    if return_z <= -sigma and rsi <= rsi_low and atr_z >= atr_z_min and ema200 > 0 and close > ema200 * ema_floor:
+        return "LONG"
+    if return_z >= sigma and rsi >= rsi_high and atr_z >= atr_z_min and ema200 > 0 and close < ema200 * ema_ceiling:
+        return "SHORT"
+    return "NEUTRAL"
+
+
 def enrich_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
