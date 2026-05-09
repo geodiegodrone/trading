@@ -1,69 +1,96 @@
 # SWINGVOLUME
 
-## Decisión
+## Decision
 
-Bot anterior no mostró edge robusto en BTC 1h:
+The previous bot did not show robust edge in BTC 1h:
 
-- meta-labeling con 57 features
-- 18 iteraciones de búsqueda
-- hasta 5 años de data
-- hold-out sin réplica
+- meta-labeling with 57 features
+- 18 search iterations
+- up to 5 years of data
+- out-of-sample holdout did not replicate
 
-Decisión: sacar ML de path crítico. Operar un solo setup discrecional cuantificado. Si no pasa 90 días demo, apagar.
+Decision: remove ML from the critical path. Trade a single quantified discretionary setup. If it does not pass 90 demo days, shut it down.
 
 ## Setup
 
 Timeframes:
 
-- contexto macro: `D1`
+- macro context: `D1`
 - trigger: `H4`
 
-Sesgo D1:
+Daily bias:
 
-- `EMA20_D1 > EMA200_D1` -> solo `LONG`
-- `EMA20_D1 < EMA200_D1` -> solo `SHORT`
-- cierre D1 no puede quedar en extremo de la vela:
+- `EMA20_D1 > EMA200_D1` -> only `LONG`
+- `EMA20_D1 < EMA200_D1` -> only `SHORT`
+- daily close cannot sit at an extreme of the candle:
   - `close_pos = (close-low)/(high-low)`
-  - requiere `0.02 <= close_pos <= 0.98`
+  - requires `0.02 <= close_pos <= 0.98`
 
-Divergencia MACD H4:
+MACD divergence on H4:
 
-- usar histograma `MACD(12,26,9)`
-- normalizar como `% del precio`: `macd_hist_pct = macd_hist / close`
-- para `LONG`:
-  - primer bajo profundo `<= -0.0005`
-  - segundo bajo entre 2 y 8 velas después
-  - precio hace `lower low`
-  - histograma hace `higher low`
-- para `SHORT`: espejo
-- divergencia expira en `4` velas H4
+- use histogram `MACD(12,26,9)`
+- normalize as `% of price`: `macd_hist_pct = macd_hist / close`
+- for `LONG`:
+  - first deep low `<= -0.0005`
+  - second low 2 to 8 H4 bars later
+  - price makes a lower low
+  - histogram makes a higher low
+- for `SHORT`: mirror
+- divergence expires after `4` H4 bars
 
-Vela de volumen H4:
+Volume candle on H4:
 
 - `volume > vol_ma20 * 1.3`
 - `vol_zscore_20 >= 1.5`
-- dos velas previas con `volume < vol_ma20 * 0.9`
-- cuerpo `>= 60%` del rango
-- vela direccional:
+- two previous candles with `volume < vol_ma20 * 0.9`
+- body `>= 60%` of candle range
+- directional candle:
   - `LONG`: `close > open`
   - `SHORT`: `close < open`
 
-Recuperación MACD:
+MACD recovery:
 
 - `LONG`: `-0.0001 <= macd_hist_pct <= 0.0005`
-- o cruce de negativo a positivo
-- `SHORT`: espejo alrededor de cero
+- or cross from negative to positive
+- `SHORT`: mirror around zero
 
-## Ejecución
+## Real Diagnosis
 
-Entrada:
+Backtest `2024-01-01 .. 2026-05-01`:
 
-- al cierre de vela H4 que confirma todo
+- `Total H4 candles`: `4892`
+- `Daily bias OK`: `4844`
+- `MACD divergence detected`: `171`
+- `Divergence not expired`: `171`
+- `Volume MA OK`: `1258`
+- `Volume z-score OK`: `536`
+- `Previous volume low`: `1961`
+- `Candle body >= 60%`: `1335`
+- `MACD range OK`: `479`
+- `All gates pass`: `0`
+
+Relaxation tested:
+
+- `MACD cross` instead of fixed range
+- result: `0 trades`
+
+Conclusion:
+
+- the setup did not produce enough entries in BTC H4 2024-2026
+- no demo
+- no parameter tuning to force activity
+- honest close of the SWINGVOLUME experiment on BTC H4
+
+## Execution
+
+Entry:
+
+- at the close of the H4 candle that confirms everything
 
 Stop:
 
-- `open` de vela gatillo
-- si no sirve, fallback `1.2 * ATR(14)`
+- `open` of the trigger candle
+- if that is not useful, fallback `1.2 * ATR(14)`
 
 Target:
 
@@ -71,25 +98,25 @@ Target:
 
 Time stop:
 
-- `5` velas H4
+- `5` H4 candles
 
 Trailing:
 
-- `+0.3R` -> stop a breakeven
-- `+0.7R` -> stop a `+0.2R`
+- `+0.3R` -> stop to breakeven
+- `+0.7R` -> stop to `+0.2R`
 
-## Riesgo
+## Risk
 
-- `0.15%` del balance por trade
-- máximo `1` trade abierto
-- máximo `1` trade nuevo por día UTC
+- `0.15%` of balance per trade
+- maximum `1` open trade
+- maximum `1` new trade per UTC day
 - daily cap `0.5%`
-- streak `3` pérdidas -> pausa `48h`
-- rolling `7` pérdidas en `20` trades (`win rate < 35%`) -> pausa `7d`
+- streak of `3` losses -> pause `48h`
+- rolling `7` losses in `20` trades (`win rate < 35%`) -> pause `7d`
 
-## Kill criterion
+## Kill Criterion
 
-En día `90`:
+At day `90`:
 
 - `sharpe >= 0.4`
 - `profit_factor >= 1.15`
@@ -97,11 +124,11 @@ En día `90`:
 - `total_trades >= 15`
 - `max_drawdown < 30%`
 
-Si falla cualquiera:
+If any fail:
 
-- escribir `KILL.flag`
-- no abrir más trades
+- write `KILL.flag`
+- stop opening trades
 
-## Regla de gobierno
+## Governance
 
-No reintroducir ML al path crítico sin actualizar esta nota y justificarlo con edge fuera de muestra real.
+Do not reintroduce ML into the critical path without updating this note and justifying it with real out-of-sample edge.

@@ -175,13 +175,23 @@ class SwingVolumeAnalyzer:
             return False, "vela sin direccionalidad"
         return True, f"vol ok z={vol_z:.2f} body={body_frac:.2f}"
 
-    def check_macd_recovery(self, df_h4: pd.DataFrame, side: str = "LONG") -> tuple[bool, str]:
+    def check_macd_recovery(self, df_h4: pd.DataFrame, side: str = "LONG", use_macd_cruce: bool = False) -> tuple[bool, str]:
         frame = self.prepare_h4(df_h4)
         if frame.empty or len(frame) < 3:
             return False, "H4 insuficiente"
+        current_raw = _safe_float(frame.iloc[-1]["macd_hist"])
+        previous_raw = _safe_float(frame.iloc[-2]["macd_hist"])
         current = _safe_float(frame.iloc[-1]["macd_hist_pct"])
         previous = _safe_float(frame.iloc[-2]["macd_hist_pct"])
         bias_side = str(side or "LONG").upper()
+        if use_macd_cruce:
+            if bias_side == "LONG":
+                if previous_raw < 0.0 <= current_raw:
+                    return True, f"macd cruzo positivo {previous_raw:.5f}->{current_raw:.5f}"
+                return False, f"macd_raw {current_raw:.5f} sin cruce positivo"
+            if previous_raw > 0.0 >= current_raw:
+                return True, f"macd cruzo negativo {previous_raw:.5f}->{current_raw:.5f}"
+            return False, f"macd_raw {current_raw:.5f} sin cruce negativo"
         if bias_side == "LONG":
             if -0.0001 <= current <= 0.0005:
                 return True, f"macd_hist_pct {current:.5f} en rango"

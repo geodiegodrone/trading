@@ -38,3 +38,4 @@ __pycache__/
 !/bot/data/historical/README.md
 /bot/data/swingvolume/*
 !/bot/data/swingvolume/README.md
+/bot/backtest_diagnostics.csv

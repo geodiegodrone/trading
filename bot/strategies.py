@@ -197,7 +197,7 @@ def signal_vol_meanrev(df: pd.DataFrame, cfg: Dict[str, Any] | None = None) -> s
     return "NEUTRAL"
 
 
-def signal_swingvolume(df_d1: pd.DataFrame, df_h4: pd.DataFrame, last_n_bars_h4: int = 40) -> Signal:
+def signal_swingvolume(df_d1: pd.DataFrame, df_h4: pd.DataFrame, last_n_bars_h4: int = 40, use_macd_cruce: bool = False) -> Signal:
     analyzer = SwingVolumeAnalyzer()
     bias = analyzer.daily_bias(df_d1)
     bias_name = str(bias.get("bias") or "NEUTRAL")
@@ -213,7 +213,7 @@ def signal_swingvolume(df_d1: pd.DataFrame, df_h4: pd.DataFrame, last_n_bars_h4:
     volume_ok, volume_reason = analyzer.validate_volume_signal(h4, side=side)
     if not volume_ok:
         return Signal(reason=f"{bias_name}: {volume_reason}", daily_bias=bias_name)
-    recovery_ok, recovery_reason = analyzer.check_macd_recovery(h4, side=side)
+    recovery_ok, recovery_reason = analyzer.check_macd_recovery(h4, side=side, use_macd_cruce=use_macd_cruce)
     if not recovery_ok:
         return Signal(reason=f"{bias_name}: {recovery_reason}", daily_bias=bias_name)
     row = h4.iloc[-1]
