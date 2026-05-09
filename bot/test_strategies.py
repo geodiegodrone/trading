@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import pandas as pd
+from unittest.mock import patch
 
 from bot_config import DEFAULT_CONFIG
-from strategies import signal_breakout, signal_meanrev, signal_trend, signal_vol_meanrev, volume_filter_passes
+from feature_swingvolume import DivergenceState
+from strategies import Signal, signal_breakout, signal_meanrev, signal_swingvolume, signal_trend, signal_vol_meanrev, volume_filter_passes
 
 
 def test_trend() -> None:
@@ -100,6 +102,32 @@ def test_vol_meanrev_short_signal() -> None:
     assert signal_vol_meanrev(df, DEFAULT_CONFIG) == "SHORT"
 
 
+def test_swingvolume_long_signal() -> None:
+    d1 = pd.DataFrame([{"open": 100, "high": 105, "low": 95, "close": 101, "volume": 1000}] * 260)
+    h4 = pd.DataFrame(
+        [
+            {"open": 100 + i * 0.1, "high": 101 + i * 0.1, "low": 99 + i * 0.1, "close": 100.5 + i * 0.1, "volume": 1000 + i * 5, "atr_14": 4.0}
+            for i in range(80)
+        ]
+    )
+    divergence = DivergenceState("LONG", 20, 24, -0.0012, -0.0007, 95000.0, 94000.0, 1)
+    with patch("strategies.SwingVolumeAnalyzer.daily_bias", return_value={"bias": "ALCISTA", "reason": "EMA20 D1 > EMA200 D1", "close_pos": 0.45}), patch(
+        "strategies.SwingVolumeAnalyzer.prepare_h4", return_value=h4
+    ), patch(
+        "strategies.SwingVolumeAnalyzer.detect_macd_divergence", return_value=divergence
+    ), patch(
+        "strategies.SwingVolumeAnalyzer.validate_volume_signal", return_value=(True, "vol ok")
+    ), patch(
+        "strategies.SwingVolumeAnalyzer.check_macd_recovery", return_value=(True, "macd ok")
+    ):
+        signal = signal_swingvolume(d1, h4)
+    assert isinstance(signal, Signal)
+    assert signal.side == "LONG"
+    assert signal.stop_price is not None
+    assert signal.tp_price is not None
+    assert signal.tp_price > signal.entry_price > signal.stop_price
+
+
 if __name__ == "__main__":
     test_trend()
     test_meanrev()
@@ -108,4 +136,5 @@ if __name__ == "__main__":
     test_volume_filter_breakout_low_volume_blocks()
     test_vol_meanrev_long_signal()
     test_vol_meanrev_short_signal()
+    test_swingvolume_long_signal()
     print("test_strategies_ok")

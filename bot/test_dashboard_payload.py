@@ -7,7 +7,7 @@ import dashboard_multi
 
 def _frame() -> pd.DataFrame:
     rows = []
-    for i in range(80):
+    for i in range(260):
         price = 75000.0 + i * 10.0
         rows.append(
             {

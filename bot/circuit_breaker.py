@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 
 import trade_log
 
@@ -50,7 +50,7 @@ def _load_state() -> Dict[str, Any]:
 
 
 def _save_state(state: Dict[str, Any]) -> None:
-    STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    STATE_PATH.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -88,7 +88,7 @@ def update_on_trade_close(pnl: float, win: bool) -> None:
     state["consecutive_losses"] = 0 if win else int(state.get("consecutive_losses", 0)) + 1
     results = list(state.get("last_trade_results") or [])
     results.append(1 if win else 0)
-    state["last_trade_results"] = results[-max(20, len(results)) :]
+    state["last_trade_results"] = results[-20:]
     pnls = list(state.get("recent_trade_pnls") or [])
     pnls.append(_safe_float(pnl))
     state["recent_trade_pnls"] = pnls[-100:]
@@ -146,8 +146,8 @@ def _rolling_drawdown() -> float:
         pnls = [_safe_float(row.get("pnl")) for row in trades if row.get("pnl") is not None and str(row.get("result") or "").upper() != "RECONCILED"][-100:]
     if not pnls:
         return 0.0
-    equity = []
     running = 0.0
+    equity: list[float] = []
     for pnl in pnls:
         running += pnl
         equity.append(running)
@@ -182,9 +182,10 @@ def check_circuit_breaker(balance: float, daily_start: float, weekly_start: floa
     if len(recent) >= 10:
         winrate = sum(recent) / max(1, len(recent))
         if winrate < float(cfg["cb_rolling_winrate_min"]):
+            rolling_pause_hours = float(cfg.get("cb_rolling_pause_hours", float(cfg["cb_cooldown_hours"]) * 2.0))
             return _pause(
                 f"Winrate {winrate:.0%} en últimos {len(recent)} trades < {float(cfg['cb_rolling_winrate_min']):.0%}",
-                _utc_now() + timedelta(hours=float(cfg["cb_cooldown_hours"]) * 2.0),
+                _utc_now() + timedelta(hours=rolling_pause_hours),
             )
 
     open_ = _safe_float(last_candle.get("open"))

@@ -2959,7 +2959,7 @@
         mlBtn.style.display = 'none';
       }
       const modeLabel = String(kpis?.mode_label || 'OBSERVATION');
-      const modeDetail = String(kpis?.mode_detail || 'ML off, vol-meanrev only, 0.15% risk');
+      const modeDetail = String(kpis?.mode_detail || 'SWINGVOLUME only, 0.15% risk');
       const modeDemoOnly = Boolean(kpis?.mode_demo_only);
       setText(symbol, 'kpiSearchStatus', modeLabel);
       setText(symbol, 'kpiSearchHint', modeDetail);

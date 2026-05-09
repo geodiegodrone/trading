@@ -15,6 +15,8 @@ from fastapi.responses import HTMLResponse
 import activity_log
 import binance_broker
 import circuit_breaker
+import data_manager
+from feature_swingvolume import SwingVolumeAnalyzer
 import historical_data
 import kill_criterion
 import market_stream
@@ -23,7 +25,7 @@ from features import build_features
 import ml_model
 import regime as regime_detector
 import search_loop
-from strategies import signal_breakout, signal_meanrev, signal_trend, signal_vol_meanrev, volume_filter_passes
+from strategies import Signal, signal_breakout, signal_meanrev, signal_swingvolume, signal_trend, signal_vol_meanrev, volume_filter_passes
 import trade_log
 
 ROOT = Path(__file__).resolve().parent
@@ -368,6 +370,64 @@ def _trade_gate_state(last, df, cfg, position=None, ml_ready=False, ml_confidenc
     return {"status": "OBSERVATION", "reason": f"vol-meanrev activo | señal {signal} | riesgo 0.15%", "ready": True}
 
 
+def _dashboard_swing_state(df_h4, df_d1, cfg):
+    if df_h4.empty or df_d1.empty:
+        return {
+            "regime_name": "N/A",
+            "strategy_kind": "none",
+            "signal": "NEUTRAL",
+            "signal_reason": "sin datos",
+            "volume_ok": False,
+            "volume_reason": "sin datos",
+            "volume_regime": "SWINGVOLUME",
+            "daily_bias": "NEUTRAL",
+            "stop_price": 0.0,
+            "tp_price": 0.0,
+        }
+    analyzer = SwingVolumeAnalyzer("BTCUSDT")
+    prepared_h4 = analyzer.prepare_h4(df_h4)
+    signal = signal_swingvolume(df_d1, prepared_h4, last_n_bars_h4=40)
+    last = prepared_h4.iloc[-1]
+    volume = _as_float(last.get("volume"))
+    vol_ma20 = _as_float(last.get("vol_ma20"))
+    vol_z = _as_float(last.get("vol_zscore_20"))
+    body_frac = _as_float(last.get("body_frac"))
+    volume_ok = volume > vol_ma20 * float(cfg.get("swing_volume_mult", 1.3)) and vol_z >= float(cfg.get("swing_volume_z", 1.5)) and body_frac >= float(cfg.get("swing_body_frac", 0.6))
+    volume_reason = f"vol={volume:.0f} | ma20={vol_ma20:.0f} | z={vol_z:.2f} | body={body_frac:.2f}"
+    return {
+        "regime_name": str(signal.daily_bias or "NEUTRAL"),
+        "strategy_kind": "swingvolume",
+        "signal": signal.side,
+        "signal_reason": signal.reason,
+        "volume_ok": bool(volume_ok),
+        "volume_reason": str(volume_reason),
+        "volume_regime": "SWINGVOLUME",
+        "daily_bias": str(signal.daily_bias or "NEUTRAL"),
+        "stop_price": _as_float(signal.stop_price),
+        "tp_price": _as_float(signal.tp_price),
+    }
+
+
+def _trade_gate_swing_state(last, df_h4, df_d1, cfg, position=None):
+    if last is None:
+        return {"status": "SIN DATOS", "reason": "Esperando velas suficientes", "ready": False}
+    live_gate = search_loop.load_live_gate()
+    kill_status = kill_criterion.status()
+    if bool(kill_status.get("killed")):
+        return {"status": "KILL", "reason": str(kill_status.get("kill_reason") or "KILL.flag presente"), "ready": False}
+    if not bool(live_gate.get("mode_demo_only")):
+        reason = str(live_gate.get("reason") or live_gate.get("recommendation") or "mode_demo_only=false")
+        return {"status": "GATE OFF", "reason": reason, "ready": False}
+    if position:
+        return {"status": "POSICIÓN ABIERTA", "reason": "Ya hay una operación activa", "ready": False}
+    signal_state = _dashboard_swing_state(df_h4, df_d1, cfg)
+    if signal_state["signal"] == "NEUTRAL":
+        return {"status": "ESPERANDO", "reason": signal_state.get("signal_reason") or "Sin setup activo", "ready": False}
+    if _daily_loss_pct(_get_balance()) >= float(cfg.get("daily_risk_cap", 0.5)):
+        return {"status": "ESPERANDO", "reason": f"Riesgo diario agotado {_daily_loss_pct(_get_balance()):.2f}% / {float(cfg.get('daily_risk_cap', 0.5)):.2f}%", "ready": False}
+    return {"status": "OBSERVATION", "reason": f"swingvolume activo | señal {signal_state['signal']} | riesgo 0.15%", "ready": True}
+
+
 def _health_issues_for_symbol(exchange_pos, local_pos, registry_trade_id, open_rows, exchange_error=None):
     issues = []
     active_trade_id = registry_trade_id
@@ -586,10 +646,12 @@ def _build_symbol_payload(symbol):
     cfg_timeframe = int(cfg.get("primary_timeframe", cfg.get("timeframe", os.getenv("TIMEFRAME", "60"))))
     df = _fetch_candles(symbol, cfg_timeframe)
     df = _compute_indicators(df, cfg)
+    df_d1 = _fetch_candles(symbol, int(cfg.get("confirmation_timeframe", 1440)), 520)
+    df_d1 = _compute_indicators(df_d1, cfg)
     events = _recent_activity(symbol, 20)
     updated_at = datetime.now(timezone.utc)
     cb_status = circuit_breaker.get_status()
-    if df.empty or len(df) < 50:
+    if df.empty or len(df) < 50 or df_d1.empty or len(df_d1) < 220:
         return {
             "price": 0.0,
             "ema9": 0.0,
@@ -651,7 +713,7 @@ def _build_symbol_payload(symbol):
                 ml_confidence = 0.5
         except Exception:
             ml_confidence = 0.5
-    signal_state = _dashboard_strategy_state(df, cfg)
+    signal_state = _dashboard_swing_state(df, df_d1, cfg)
     primary_only_mode = False
     kpis = {
         "balance": balance,
@@ -677,7 +739,7 @@ def _build_symbol_payload(symbol):
         "primary_only_mode": primary_only_mode,
         "trade_stats": {**stats, "reconciled_count": int(stats.get("reconciled_count", stats.get("reconciled", 0) or 0))},
         "mode_label": "OBSERVATION",
-        "mode_detail": "ML off, vol-meanrev only, 0.15% risk",
+        "mode_detail": "SWINGVOLUME only, 0.15% risk",
         "mode_demo_only": bool(live_gate.get("mode_demo_only", False)),
         "kill_status": kill_status,
     }
@@ -697,14 +759,14 @@ def _build_symbol_payload(symbol):
         "ema21": _as_float(last.get(cols.get("ema_slow", "ema21"))),
         "ema200": _as_float(last.get(cols.get("ema_trend", "ema200"))),
         "rsi": _as_float(last.get("rsi")),
-        "market_regime": signal_state.get("regime_name", "MIXED"),
+        "market_regime": signal_state.get("regime_name", "NEUTRAL"),
         "daily_loss_pct": _daily_loss_pct(balance),
         "daily_risk_used": _daily_loss_pct(balance),
         "daily_risk_cap": float(cfg.get("daily_risk_cap", 0.5)),
         "kelly_fraction": _kelly_fraction(),
         "primary_only_mode": primary_only_mode,
     }
-    trade_gate = _trade_gate_state(last, df, cfg, position=position, ml_ready=ml_ready, ml_confidence=ml_confidence, ml_info=ml_info)
+    trade_gate = _trade_gate_swing_state(last, df, df_d1, cfg, position=position)
     candles = [
         {
             "ts": int(row["ts"]),
@@ -738,7 +800,7 @@ def _build_symbol_payload(symbol):
         },
         "mode": {
             "label": "OBSERVATION",
-            "detail": "ML off, vol-meanrev only, 0.15% risk",
+            "detail": "SWINGVOLUME only, 0.15% risk",
             "mode_demo_only": bool(live_gate.get("mode_demo_only", False)),
         },
         "kill_criterion": kill_status,

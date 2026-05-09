@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 import activity_log
 import binance_broker
 import circuit_breaker
+import data_manager
 import kill_criterion
 import market_stream
 from bot_config import DEFAULT_CONFIG, get_symbol_config, parse_symbols
@@ -20,7 +21,7 @@ from features import FEATURE_COLUMNS, build_features
 import ml_model
 import regime as regime_detector
 import search_loop
-from strategies import enrich_indicators, signal_breakout, signal_meanrev, signal_trend, signal_vol_meanrev, volume_filter_passes
+from strategies import Signal, enrich_indicators, signal_breakout, signal_meanrev, signal_swingvolume, signal_trend, signal_vol_meanrev, volume_filter_passes
 import trade_log
 
 ROOT = Path(__file__).resolve().parent
@@ -71,16 +72,21 @@ def _load_live_gate():
 
 
 def _live_gate_ready(gate):
-    if bool(gate.get("ready_for_live")) or bool(gate.get("mode_demo_only")):
+    if bool(gate.get("mode_demo_only")):
         return True, ""
-    reason = str(gate.get("reason") or gate.get("recommendation") or "ready_for_live=false")
+    reason = str(gate.get("reason") or gate.get("recommendation") or "mode_demo_only=false")
     return False, reason
 
 
 def _apply_live_gate_config(cfg, gate):
     runtime_cfg = dict(cfg)
-    if (bool(gate.get("ready_for_live")) or bool(gate.get("mode_demo_only"))) and isinstance(gate.get("config"), dict):
+    gate_cfg = gate.get("config") if isinstance(gate.get("config"), dict) else {}
+    if bool(gate.get("mode_demo_only")) and gate_cfg and str(gate_cfg.get("strategy_mode") or "").lower() == "swingvolume":
         runtime_cfg.update(gate["config"])
+    runtime_cfg["strategy_mode"] = "swingvolume"
+    runtime_cfg["primary_timeframe"] = 240
+    runtime_cfg["confirmation_timeframe"] = 1440
+    runtime_cfg["timeframe"] = 240
     return runtime_cfg
 
 
@@ -94,9 +100,9 @@ def _as_float(value, default=0.0):
 def _get_symbol_config(symbol):
     cfg = dict(DEFAULT_CONFIG)
     cfg.update(get_symbol_config(symbol))
-    cfg["strategy_mode"] = str(cfg.get("strategy_mode", "vol_meanrev")).lower()
-    cfg["primary_timeframe"] = int(cfg.get("primary_timeframe", cfg.get("timeframe", 60)))
-    cfg["confirmation_timeframe"] = int(cfg.get("confirmation_timeframe", 240))
+    cfg["strategy_mode"] = "swingvolume"
+    cfg["primary_timeframe"] = 240
+    cfg["confirmation_timeframe"] = 1440
     cfg["timeframe"] = int(cfg.get("timeframe", cfg["primary_timeframe"]))
     cfg["leverage"] = int(cfg.get("leverage", 2))
     cfg["ema_fast"] = int(cfg.get("ema_fast", 9))
@@ -130,9 +136,24 @@ def _get_symbol_config(symbol):
     cfg["cb_weekly_loss_pct"] = float(cfg.get("cb_weekly_loss_pct", 7.0))
     cfg["cb_consecutive_losses"] = int(cfg.get("cb_consecutive_losses", 5))
     cfg["cb_rolling_window"] = int(cfg.get("cb_rolling_window", 20))
-    cfg["cb_rolling_winrate_min"] = float(cfg.get("cb_rolling_winrate_min", 0.30))
+    cfg["cb_rolling_winrate_min"] = float(cfg.get("cb_rolling_winrate_min", 0.35))
     cfg["cb_volatility_spike_pct"] = float(cfg.get("cb_volatility_spike_pct", 8.0))
-    cfg["cb_cooldown_hours"] = float(cfg.get("cb_cooldown_hours", 168.0))
+    cfg["cb_cooldown_hours"] = float(cfg.get("cb_cooldown_hours", 48.0))
+    cfg["cb_rolling_pause_hours"] = float(cfg.get("cb_rolling_pause_hours", 168.0))
+    cfg["swing_macd_floor_pct"] = float(cfg.get("swing_macd_floor_pct", -0.0005))
+    cfg["swing_macd_recovery_low"] = float(cfg.get("swing_macd_recovery_low", -0.0001))
+    cfg["swing_macd_recovery_high"] = float(cfg.get("swing_macd_recovery_high", 0.0005))
+    cfg["swing_volume_mult"] = float(cfg.get("swing_volume_mult", 1.3))
+    cfg["swing_volume_z"] = float(cfg.get("swing_volume_z", 1.5))
+    cfg["swing_body_frac"] = float(cfg.get("swing_body_frac", 0.6))
+    cfg["swing_stop_atr_fallback"] = float(cfg.get("swing_stop_atr_fallback", 1.2))
+    cfg["swing_tp_r"] = float(cfg.get("swing_tp_r", 3.0))
+    cfg["swing_breakeven_r"] = float(cfg.get("swing_breakeven_r", 0.3))
+    cfg["swing_lock_r"] = float(cfg.get("swing_lock_r", 0.7))
+    cfg["swing_lock_stop_r"] = float(cfg.get("swing_lock_stop_r", 0.2))
+    cfg["swing_time_stop_bars"] = int(cfg.get("swing_time_stop_bars", 5))
+    cfg["swing_d1_days"] = int(cfg.get("swing_d1_days", 730))
+    cfg["swing_h4_days"] = int(cfg.get("swing_h4_days", 730))
     cfg["vol_meanrev_sigma"] = float(cfg.get("vol_meanrev_sigma", 2.5))
     cfg["vol_meanrev_rsi_low"] = float(cfg.get("vol_meanrev_rsi_low", 25.0))
     cfg["vol_meanrev_rsi_high"] = float(cfg.get("vol_meanrev_rsi_high", 75.0))
@@ -1009,13 +1030,22 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt, strategy_kin
     atr = _as_float(last.get("atr"))
     if price <= 0 or atr <= 0:
         return
-    side = "Buy" if signal == "LONG" else "Sell"
+    signal_side = signal.side if isinstance(signal, Signal) else str(signal)
+    side = "Buy" if signal_side == "LONG" else "Sell"
     qty = binance_broker.normalize_quantity(symbol, (trade_usdt * cfg["leverage"]) / price)
     if qty <= 0:
         logger.warning("Skipping %s entry because normalized quantity is too small", symbol)
         return
     sma20 = _as_float(pd.Series(df["close"]).rolling(20).mean().iloc[-1]) if len(df) >= 20 else 0.0
-    if strategy_kind == "vol_meanrev":
+    if strategy_kind == "swingvolume" and isinstance(signal, Signal):
+        sl = _as_float(signal.stop_price)
+        tp = _as_float(signal.tp_price)
+        sl_dist = abs(price - sl)
+        if sl_dist <= 0:
+            sl_dist = atr * float(cfg.get("swing_stop_atr_fallback", 1.2))
+            sl = price - sl_dist if side == "Buy" else price + sl_dist
+            tp = price + (sl_dist * float(cfg.get("swing_tp_r", 3.0))) if side == "Buy" else price - (sl_dist * float(cfg.get("swing_tp_r", 3.0)))
+    elif strategy_kind == "vol_meanrev":
         sl_dist = atr * float(cfg.get("vol_meanrev_sl_atr", 1.0))
     elif strategy_kind == "meanrev":
         sl_dist = atr * float(cfg.get("meanrev_atr_mult", 0.5))
@@ -1023,7 +1053,7 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt, strategy_kin
         sl_dist = atr * float(cfg.get("volatile_atr_mult", 2.0) if regime_name == "VOLATILE" else cfg.get("breakout_atr_mult", 1.0))
     else:
         sl_dist = atr * cfg["atr_mult"]
-    if side == "Buy":
+    if strategy_kind != "swingvolume" and side == "Buy":
         sl = price - sl_dist
         if strategy_kind == "vol_meanrev":
             tp = price + atr * float(cfg.get("vol_meanrev_tp_atr", 0.6))
@@ -1038,7 +1068,7 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt, strategy_kin
         except Exception as exc:
             logger.warning("open_long failed for %s: %s", symbol, exc)
             return
-    else:
+    elif strategy_kind != "swingvolume":
         sl = price + sl_dist
         if strategy_kind == "vol_meanrev":
             tp = price - atr * float(cfg.get("vol_meanrev_tp_atr", 0.6))
@@ -1112,8 +1142,9 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt, strategy_kin
         "strategy_kind": strategy_kind,
         "regime_name": regime_name,
         "primary_timeframe": int(cfg.get("primary_timeframe", cfg.get("timeframe", 60))),
-        "timeout_bars": int(cfg.get("vol_meanrev_time_stop_bars", 12)) if strategy_kind == "vol_meanrev" else int(cfg.get("t_bars", 24)),
+        "timeout_bars": int(signal.time_stop_bars) if strategy_kind == "swingvolume" and isinstance(signal, Signal) else int(cfg.get("vol_meanrev_time_stop_bars", 12)) if strategy_kind == "vol_meanrev" else int(cfg.get("t_bars", 24)),
         "opened_ts_ms": int(_as_float(last.get("ts"))),
+        "initial_stop_distance": sl_dist,
     }
     _save_portfolio_state(_calc_portfolio_risk(balance, state))
     try:
@@ -1143,8 +1174,56 @@ def _update_position(symbol, last, signal, cfg):
     current_ts_ms = int(_as_float(last.get("ts"), opened_ts_ms))
     elapsed_bars = 0
     strategy_kind = str(position.get("strategy_kind") or "trend").lower()
+    initial_stop_distance = _as_float(position.get("initial_stop_distance") or position.get("atr_stop_distance"))
     if opened_ts_ms > 0 and current_ts_ms >= opened_ts_ms and timeframe_minutes > 0:
         elapsed_bars = int((current_ts_ms - opened_ts_ms) / (timeframe_minutes * 60 * 1000))
+    if strategy_kind == "swingvolume":
+        current_r = 0.0
+        if initial_stop_distance > 0:
+            current_r = (price - entry) / initial_stop_distance if side.lower() == "buy" else (entry - price) / initial_stop_distance
+        if side.lower() == "buy":
+            if current_r >= float(cfg.get("swing_lock_r", 0.7)):
+                lock_sl = entry + initial_stop_distance * float(cfg.get("swing_lock_stop_r", 0.2))
+                if lock_sl > sl:
+                    sl = lock_sl
+                    position["sl"] = sl
+            elif current_r >= float(cfg.get("swing_breakeven_r", 0.3)):
+                if entry > sl:
+                    sl = entry
+                    position["sl"] = sl
+            if elapsed_bars >= int(position.get("timeout_bars", cfg.get("swing_time_stop_bars", 5))):
+                hit_exit = True
+                reason = "EXIT_TIMEOUT"
+            elif price <= sl or price >= tp:
+                hit_exit = True
+                reason = "SL" if price <= sl else "TP"
+        else:
+            if current_r >= float(cfg.get("swing_lock_r", 0.7)):
+                lock_sl = entry - initial_stop_distance * float(cfg.get("swing_lock_stop_r", 0.2))
+                if sl <= 0 or lock_sl < sl:
+                    sl = lock_sl
+                    position["sl"] = sl
+            elif current_r >= float(cfg.get("swing_breakeven_r", 0.3)):
+                if sl <= 0 or entry < sl:
+                    sl = entry
+                    position["sl"] = sl
+            if elapsed_bars >= int(position.get("timeout_bars", cfg.get("swing_time_stop_bars", 5))):
+                hit_exit = True
+                reason = "EXIT_TIMEOUT"
+            elif price >= sl or price <= tp:
+                hit_exit = True
+                reason = "SL" if price >= sl else "TP"
+        if hit_exit:
+            _close_trade(symbol, position, price, reason=reason)
+            state["open_positions"].pop(symbol, None)
+            _save_portfolio_state(state)
+            registry = _open_trade_registry()
+            registry.pop(symbol, None)
+            _save_trade_registry(registry)
+        else:
+            state["open_positions"][symbol] = position
+            _save_portfolio_state(_calc_portfolio_risk(_as_float(binance_broker.get_balance()), state))
+        return
     if strategy_kind == "vol_meanrev":
         if side.lower() == "buy":
             if elapsed_bars >= int(position.get("timeout_bars", 12)):
@@ -1257,16 +1336,19 @@ def _regime_threshold(regime_name, cfg):
 
 
 def _select_signal(symbol, primary_df, confirmation_df, cfg):
-    regime_info = regime_detector.classify_regime(primary_df)
-    regime_name = str(regime_info.get("regime", "MIXED")).upper()
-    activity_log.push(
-        symbol,
-        "regime",
-        f"Observation mode | setup=vol_meanrev | regime={regime_name} | hurst={float(regime_info.get('hurst', 0.0)):.2f} | vol={float(regime_info.get('realized_volatility_pct', 0.0)):.2f}% | atr_z={float(regime_info.get('atr_pct_zscore_50', 0.0)):.2f}",
-    )
-    signal = signal_vol_meanrev(primary_df, cfg)
-    meta = {"mixed_fallback": False, "reason": "volatility overshoot mean reversion", "source": "vol_meanrev"}
-    return signal, "vol_meanrev", regime_name, meta
+    signal = signal_swingvolume(confirmation_df, primary_df, last_n_bars_h4=40)
+    bias = str(signal.daily_bias or "NEUTRAL").upper()
+    activity_log.push(symbol, "setup", f"SWINGVOLUME | bias={bias} | side={signal.side} | reason={signal.reason}")
+    meta = {
+        "reason": signal.reason,
+        "source": "swingvolume",
+        "daily_bias": bias,
+        "stop_price": signal.stop_price,
+        "tp_price": signal.tp_price,
+        "entry_price": signal.entry_price,
+        "time_stop_bars": signal.time_stop_bars,
+    }
+    return signal, "swingvolume", bias, meta
 
 
 def _startup_diagnostics(symbol, cfg):
@@ -1283,12 +1365,12 @@ def _startup_diagnostics(symbol, cfg):
     lines = [
         "=" * 60,
         "BOT STARTUP DIAGNOSTICS",
-        f"Strategy mode: {cfg['strategy_mode']} (observation)",
+        f"Strategy mode: {cfg['strategy_mode']} (SWINGVOLUME only)",
         f"Primary TF: {int(cfg['primary_timeframe'])}m | Confirmation TF: {int(cfg['confirmation_timeframe'])}m",
         f"ML model: trained_on={int(info.get('trained_on', 0) or 0)} ready={bool(info.get('ready', False))} sharpe={float(info.get('val_sharpe', 0.0)):.2f} thr={float(info.get('suggested_threshold', cfg.get('ml_threshold', 0.55))):.2f}",
         f"ML feature count expected={expected} / model={model_count} {'MISMATCH!' if mismatch else 'OK'}",
         f"Circuit breaker: enabled={bool(cfg.get('circuit_breaker_enabled', True))} paused={bool(cb_status.get('paused', False))}",
-        f"Live gate: ready_for_live={bool(gate.get('ready_for_live', False))} mode_demo_only={bool(gate.get('mode_demo_only', False))} reason={gate.get('reason') or gate.get('recommendation') or ''}",
+        f"Live gate: mode_demo_only={bool(gate.get('mode_demo_only', False))} ready_for_live={bool(gate.get('ready_for_live', False))} reason={gate.get('reason') or gate.get('recommendation') or ''}",
         f"Kill criterion: killed={bool(kill_status.get('killed', False))} days={int(kill_status.get('days_running', 0))}/{int(kill_status.get('days_required', 90))} reason={kill_status.get('kill_reason') or ''}",
         f"Trades in DB: total={len(trades)} closed_real={int(stats.get('total', 0))}",
         f"Daily start balance: {_as_float(daily.get('daily_start_balance'), 0.0):.2f} USDT",
@@ -1319,31 +1401,32 @@ def run_symbol(symbol, cfg, shared_stop_event):
             balance = _as_float(binance_broker.get_balance())
             daily_state = _load_daily_balance()
             weekly_state = _load_weekly_balance()
-            primary_df = _compute_indicators(_fetch_candles(symbol, runtime_cfg["primary_timeframe"], limit=450), runtime_cfg)
-            if primary_df.empty or len(primary_df) < 220:
-                _log_decision(symbol, {"regime": "N/A", "strategy_used": "vol_meanrev", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "SALTAR", "decision_reason_code": "data_gap", "decision_reason": "velas insuficientes"})
+            primary_df = _compute_indicators(_fetch_candles(symbol, runtime_cfg["primary_timeframe"], limit=420), runtime_cfg)
+            confirmation_df = _compute_indicators(_fetch_candles(symbol, runtime_cfg["confirmation_timeframe"], limit=520), runtime_cfg)
+            if primary_df.empty or len(primary_df) < 60 or confirmation_df.empty or len(confirmation_df) < 220:
+                _log_decision(symbol, {"regime": "N/A", "strategy_used": "swingvolume", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "SALTAR", "decision_reason_code": "data_gap", "decision_reason": "velas H4/D1 insuficientes"})
                 time.sleep(60)
                 continue
             last = primary_df.iloc[-1].to_dict()
-            signal, strategy_kind, regime_name, signal_meta = _select_signal(symbol, primary_df, primary_df, runtime_cfg)
+            signal, strategy_kind, regime_name, signal_meta = _select_signal(symbol, primary_df, confirmation_df, runtime_cfg)
             position = _get_current_position(symbol)
             if position:
-                _update_position(symbol, last, signal, runtime_cfg)
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "POSICION_ABIERTA", "decision_reason_code": "position_open", "decision_reason": "gesti?n de posici?n en curso"})
+                _update_position(symbol, last, signal.side if isinstance(signal, Signal) else str(signal), runtime_cfg)
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side if isinstance(signal, Signal) else str(signal), "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "POSICION_ABIERTA", "decision_reason_code": "position_open", "decision_reason": "gestión de posición swingvolume"})
                 time.sleep(60)
                 continue
             if not gate_ready:
-                gate_log = f"[GATE] trading deshabilitado: ready_for_live=false y mode_demo_only=false reason={gate_reason}"
+                gate_log = f"[GATE] trading deshabilitado: mode_demo_only=false reason={gate_reason}"
                 if _LIVE_GATE_STATE.get(symbol) != gate_log:
                     activity_log.push(symbol, "gate", gate_log)
                     _LIVE_GATE_STATE[symbol] = gate_log
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "RECHAZAR", "decision_reason_code": "live_gate", "decision_reason": gate_reason})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side if isinstance(signal, Signal) else str(signal), "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "RECHAZAR", "decision_reason_code": "live_gate", "decision_reason": gate_reason})
                 time.sleep(60)
                 continue
             kill_status = _kill_status()
             if bool(kill_status.get("killed")):
                 reason = str(kill_status.get("kill_reason") or "KILL.flag presente")
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "RECHAZAR", "decision_reason_code": "kill_flag", "decision_reason": reason})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side if isinstance(signal, Signal) else str(signal), "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "RECHAZAR", "decision_reason_code": "kill_flag", "decision_reason": reason})
                 time.sleep(60)
                 continue
             cb_status_text = "ok"
@@ -1354,7 +1437,7 @@ def run_symbol(symbol, cfg, shared_stop_event):
                 if paused:
                     cb_status_text = f"PAUSED({reason})"
                     activity_log.push(symbol, "circuit_breaker", f"CB paused: {reason}")
-                    _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "CB_PAUSED", "decision_reason_code": "cb_paused", "decision_reason": reason})
+                    _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side if isinstance(signal, Signal) else str(signal), "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "CB_PAUSED", "decision_reason_code": "cb_paused", "decision_reason": reason})
                     time.sleep(60)
                     continue
             ml_info = {}
@@ -1362,52 +1445,55 @@ def run_symbol(symbol, cfg, shared_stop_event):
                 ml_info = ml_model.model_info(symbol)
             except Exception:
                 ml_info = {}
-            observation_reason = str(ml_info.get("not_ready_reason") or "ML deshabilitado del path cr?tico")
+            observation_reason = str(ml_info.get("not_ready_reason") or "ML deshabilitado del path crítico")
             if _ML_NOT_READY_STATE.get(symbol) != observation_reason:
-                activity_log.push(symbol, "ml", f"ML en observaci?n: {observation_reason}")
+                activity_log.push(symbol, "ml", f"ML en observación: {observation_reason}")
                 _ML_NOT_READY_STATE[symbol] = observation_reason
             state = _portfolio_state()
             state = _calc_portfolio_risk(balance, state)
             _save_portfolio_state(state)
-            if signal == "NEUTRAL":
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "SALTAR", "decision_reason_code": "primary_neutral", "decision_reason": signal_meta.get("reason") or "sin se?al v?lida"})
+            if not isinstance(signal, Signal) or signal.side == "NEUTRAL":
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side if isinstance(signal, Signal) else str(signal), "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "SALTAR", "decision_reason_code": "primary_neutral", "decision_reason": signal_meta.get("reason") or "sin señal swingvolume"})
                 time.sleep(60)
                 continue
             if _opened_trade_today(symbol) >= int(runtime_cfg.get("max_trades_per_day", 1)):
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason_code": "trade_limit_day", "decision_reason": "m?ximo 1 trade nuevo por d?a UTC"})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason_code": "trade_limit_day", "decision_reason": "máximo 1 trade nuevo por día UTC"})
                 time.sleep(60)
                 continue
             if _daily_loss_pct(balance) >= float(runtime_cfg.get("daily_risk_cap", 0.5)):
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason_code": "daily_risk_cap", "decision_reason": f"riesgo diario consumido {_daily_loss_pct(balance):.2f}% >= cap {float(runtime_cfg.get('daily_risk_cap', 0.5)):.2f}%"})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason_code": "daily_risk_cap", "decision_reason": f"riesgo diario consumido {_daily_loss_pct(balance):.2f}% >= cap {float(runtime_cfg.get('daily_risk_cap', 0.5)):.2f}%"})
                 time.sleep(60)
                 continue
-            price = _as_float(last.get("close"))
-            atr = _as_float(last.get("atr"))
-            atr_stop_distance = atr * float(runtime_cfg.get("vol_meanrev_sl_atr", 1.0))
+            price = _as_float(signal.entry_price or last.get("close"))
+            atr_stop_distance = abs(_as_float(signal.entry_price or price) - _as_float(signal.stop_price))
             trade_usdt = _observation_trade_usdt(balance, price, atr_stop_distance, runtime_cfg["leverage"], runtime_cfg)
             qty_preview = binance_broker.normalize_quantity(symbol, (trade_usdt * runtime_cfg["leverage"]) / price) if price > 0 else 0.0
             if qty_preview <= 0 or trade_usdt <= 0:
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason_code": "size_too_small", "decision_reason": "cantidad normalizada demasiado peque?a"})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason_code": "size_too_small", "decision_reason": "cantidad normalizada demasiado pequeña"})
                 time.sleep(60)
                 continue
             risk_pct = (qty_preview * atr_stop_distance) / balance * 100 if balance > 0 else 0.0
             projected = state.get("total_risk_pct", 0.0) + risk_pct
             if projected > float(runtime_cfg.get("daily_risk_cap", 0.5)):
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason_code": "daily_risk_cap", "decision_reason": f"riesgo proyectado {projected:.2f}% > cap {float(runtime_cfg.get('daily_risk_cap', 0.5)):.2f}%"})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason_code": "daily_risk_cap", "decision_reason": f"riesgo proyectado {projected:.2f}% > cap {float(runtime_cfg.get('daily_risk_cap', 0.5)):.2f}%"})
                 time.sleep(60)
                 continue
-            activity_log.push(symbol, "mode", f"OBSERVATION mode | setup=vol_meanrev | risk={float(runtime_cfg.get('risk_pct_per_trade', 0.15)):.2f}%")
-            _open_trade(symbol, signal, last, primary_df, runtime_cfg, balance, trade_usdt, strategy_kind="vol_meanrev", regime_name=regime_name)
-            _log_decision(symbol, {"regime": regime_name, "strategy_used": "vol_meanrev", "signal": signal, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "ABRIR", "decision_reason_code": "open", "decision_reason": f"{signal_meta.get('reason') or 'overshoot confirmado'} | OBSERVATION 0.15% risk", "mode": "observation", "size_pct": "100%"})
+            activity_log.push(symbol, "mode", f"OBSERVATION mode | setup=swingvolume | risk={float(runtime_cfg.get('risk_pct_per_trade', 0.15)):.2f}%")
+            _open_trade(symbol, signal, last, primary_df, runtime_cfg, balance, trade_usdt, strategy_kind="swingvolume", regime_name=regime_name)
+            _log_decision(symbol, {"regime": regime_name, "strategy_used": "swingvolume", "signal": signal.side, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "ABRIR", "decision_reason_code": "open", "decision_reason": f"{signal_meta.get('reason') or 'swingvolume confirmado'} | OBSERVATION 0.15% risk", "mode": "observation", "size_pct": "100%"})
         except Exception as exc:
             logger.exception("Symbol loop error for %s", symbol)
             activity_log.push(symbol, "error", f"Error: {exc}")
-            _log_decision(symbol, {"regime": "N/A", "strategy_used": "vol_meanrev", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "SALTAR", "decision_reason_code": "error", "decision_reason": f"error: {exc}"})
+            _log_decision(symbol, {"regime": "N/A", "strategy_used": "swingvolume", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "SALTAR", "decision_reason_code": "error", "decision_reason": f"error: {exc}"})
         time.sleep(60)
 
 
 def main():
     base_cfg = _get_symbol_config("BTCUSDT")
+    try:
+        data_manager.refresh_swingvolume_data("BTCUSDT", force=False, daily_days=int(base_cfg.get("swing_d1_days", 730)), h4_days=int(base_cfg.get("swing_h4_days", 730)))
+    except Exception:
+        logger.exception("Failed to refresh swingvolume caches at startup")
     stream_pairs = []
     for symbol in SYMBOLS:
         cfg = _get_symbol_config(symbol)
@@ -1433,6 +1519,10 @@ def main():
                 reconcile_state()
                 last_reconcile = now
             if now - last_kill_check >= 24 * 3600:
+                try:
+                    data_manager.refresh_swingvolume_data("BTCUSDT", force=False, daily_days=int(base_cfg.get("swing_d1_days", 730)), h4_days=int(base_cfg.get("swing_h4_days", 730)))
+                except Exception:
+                    logger.exception("Failed to refresh swingvolume caches")
                 kill_criterion.evaluate("BTCUSDT")
                 last_kill_check = now
             for thread in threads:

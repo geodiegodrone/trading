@@ -36,3 +36,5 @@ __pycache__/
 /bot/kill_criterion_log.json
 /bot/data/historical/*
 !/bot/data/historical/README.md
+/bot/data/swingvolume/*
+!/bot/data/swingvolume/README.md

@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, asdict
 from typing import Any, Dict
 
 import pandas as pd
 import pandas_ta as ta
 
+from feature_swingvolume import SwingVolumeAnalyzer
 from features import build_features
+
+
+@dataclass
+class Signal:
+    side: str = "NEUTRAL"
+    confidence: float = 0.0
+    reason: str = ""
+    stop_price: float | None = None
+    tp_price: float | None = None
+    entry_price: float | None = None
+    trigger_open: float | None = None
+    time_stop_bars: int = 5
+    daily_bias: str = "NEUTRAL"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -177,6 +195,59 @@ def signal_vol_meanrev(df: pd.DataFrame, cfg: Dict[str, Any] | None = None) -> s
     if return_z >= sigma and rsi >= rsi_high and atr_z >= atr_z_min and ema200 > 0 and close < ema200 * ema_ceiling:
         return "SHORT"
     return "NEUTRAL"
+
+
+def signal_swingvolume(df_d1: pd.DataFrame, df_h4: pd.DataFrame, last_n_bars_h4: int = 40) -> Signal:
+    analyzer = SwingVolumeAnalyzer()
+    bias = analyzer.daily_bias(df_d1)
+    bias_name = str(bias.get("bias") or "NEUTRAL")
+    if bias_name not in {"ALCISTA", "BAJISTA"}:
+        return Signal(reason=str(bias.get("reason") or "sin sesgo D1"), daily_bias=bias_name)
+    side = "LONG" if bias_name == "ALCISTA" else "SHORT"
+    h4 = analyzer.prepare_h4(df_h4)
+    if h4.empty or len(h4) < max(40, int(last_n_bars_h4)):
+        return Signal(reason="H4 insuficiente", daily_bias=bias_name)
+    divergence = analyzer.detect_macd_divergence(h4.tail(max(40, int(last_n_bars_h4))), side=side, last_n_bars=last_n_bars_h4)
+    if divergence is None:
+        return Signal(reason=f"{bias_name}: sin divergencia MACD", daily_bias=bias_name)
+    volume_ok, volume_reason = analyzer.validate_volume_signal(h4, side=side)
+    if not volume_ok:
+        return Signal(reason=f"{bias_name}: {volume_reason}", daily_bias=bias_name)
+    recovery_ok, recovery_reason = analyzer.check_macd_recovery(h4, side=side)
+    if not recovery_ok:
+        return Signal(reason=f"{bias_name}: {recovery_reason}", daily_bias=bias_name)
+    row = h4.iloc[-1]
+    entry_price = _safe_float(row.get("close"))
+    trigger_open = _safe_float(row.get("open"))
+    atr = _safe_float(row.get("atr_14") or row.get("atr"))
+    if entry_price <= 0 or atr <= 0:
+        return Signal(reason="precio/ATR invalido", daily_bias=bias_name)
+    if side == "LONG":
+        stop_price = trigger_open if trigger_open < entry_price else entry_price - (atr * 1.2)
+        risk = entry_price - stop_price
+        if risk <= 0:
+            stop_price = entry_price - (atr * 1.2)
+            risk = entry_price - stop_price
+        tp_price = entry_price + (risk * 3.0)
+    else:
+        stop_price = trigger_open if trigger_open > entry_price else entry_price + (atr * 1.2)
+        risk = stop_price - entry_price
+        if risk <= 0:
+            stop_price = entry_price + (atr * 1.2)
+            risk = stop_price - entry_price
+        tp_price = entry_price - (risk * 3.0)
+    reason = f"{bias_name}: divergencia MACD + volumen + recovery ({volume_reason}; {recovery_reason})"
+    return Signal(
+        side=side,
+        confidence=0.80,
+        reason=reason,
+        stop_price=stop_price,
+        tp_price=tp_price,
+        entry_price=entry_price,
+        trigger_open=trigger_open,
+        time_stop_bars=5,
+        daily_bias=bias_name,
+    )
 
 
 def enrich_indicators(df: pd.DataFrame) -> pd.DataFrame:

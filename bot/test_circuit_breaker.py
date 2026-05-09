@@ -11,11 +11,12 @@ import circuit_breaker
 CFG = {
     "cb_daily_loss_pct": 3.0,
     "cb_weekly_loss_pct": 7.0,
-    "cb_consecutive_losses": 4,
+    "cb_consecutive_losses": 3,
     "cb_rolling_window": 20,
-    "cb_rolling_winrate_min": 0.30,
+    "cb_rolling_winrate_min": 0.35,
     "cb_volatility_spike_pct": 8.0,
-    "cb_cooldown_hours": 12.0,
+    "cb_cooldown_hours": 48.0,
+    "cb_rolling_pause_hours": 168.0,
 }
 
 
@@ -37,7 +38,7 @@ def _reset() -> None:
 
 def test_consecutive_losses_pause() -> None:
     _reset()
-    for _ in range(5):
+    for _ in range(3):
         circuit_breaker.update_on_trade_close(-10.0, False)
     paused, reason = circuit_breaker.check_circuit_breaker(5000.0, 5000.0, 5000.0, {"open": 100, "high": 101, "low": 99}, CFG)
     assert paused and "pérdidas consecutivas" in reason.lower(), reason
