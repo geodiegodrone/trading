@@ -4,8 +4,9 @@ import pandas as pd
 from unittest.mock import patch
 
 from bot_config import DEFAULT_CONFIG
+from feature_meanrev import MeanRevState
 from feature_swingvolume import DivergenceState
-from strategies import Signal, signal_breakout, signal_meanrev, signal_swingvolume, signal_trend, signal_vol_meanrev, volume_filter_passes
+from strategies import Signal, signal_breakout, signal_meanrev, signal_meanrev_overshoot, signal_swingvolume, signal_trend, signal_vol_meanrev, volume_filter_passes
 
 
 def test_trend() -> None:
@@ -14,23 +15,22 @@ def test_trend() -> None:
     assert signal_trend(df.iloc[-1].to_dict(), df, DEFAULT_CONFIG) == "LONG"
 
 
-def test_meanrev() -> None:
-    rows = [{"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100} for _ in range(30)]
-    rows[-1].update({
-        "close": 94.0,
-        "low": 93.5,
-        "high": 95.0,
-        "rsi": 28.0,
-        "adx": 15.0,
-        "atr_pct_zscore_50": 0.0,
-        "bb_width_20": 2.0,
-        "bb_width_zscore_50": 0.0,
-        "bb_lower_20": 94.5,
-        "bb_upper_20": 105.0,
-        "bb_pos_20": 0.05,
-    })
-    df = pd.DataFrame(rows)
-    assert signal_meanrev(df.iloc[-1].to_dict(), df, DEFAULT_CONFIG) == "LONG"
+def test_meanrev(monkeypatch) -> None:
+    df = pd.DataFrame([{"ts": 0, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 100}])
+    monkeypatch.setattr(
+        "feature_meanrev.MeanRevAnalyzer.build_signal",
+        lambda self, df_1h, cfg: MeanRevState("LONG", -3.1, 22.0, 2.0, 100.0, 99.0, 100.6, "overshoot"),
+    )
+    assert signal_meanrev_overshoot(df, DEFAULT_CONFIG).side == "LONG"
+
+
+def test_meanrev_short(monkeypatch) -> None:
+    df = pd.DataFrame([{"ts": 0, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 100}])
+    monkeypatch.setattr(
+        "feature_meanrev.MeanRevAnalyzer.build_signal",
+        lambda self, df_1h, cfg: MeanRevState("SHORT", 3.2, 78.0, 2.0, 100.0, 101.0, 99.4, "overshoot"),
+    )
+    assert signal_meanrev_overshoot(df, DEFAULT_CONFIG).side == "SHORT"
 
 
 def test_breakout() -> None:
@@ -130,7 +130,15 @@ def test_swingvolume_long_signal() -> None:
 
 if __name__ == "__main__":
     test_trend()
-    test_meanrev()
+    class _DummyMonkeyPatch:
+        def setattr(self, target, value):
+            module_name, attr_name = target.rsplit(".", 1)
+            module = __import__(module_name, fromlist=[attr_name])
+            setattr(module, attr_name, value)
+
+    monkeypatch = _DummyMonkeyPatch()
+    test_meanrev(monkeypatch)
+    test_meanrev_short(monkeypatch)
     test_breakout()
     test_volume_filter_trending_low_volume_passes()
     test_volume_filter_breakout_low_volume_blocks()

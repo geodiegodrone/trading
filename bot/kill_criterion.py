@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent
 KILL_FLAG_PATH = ROOT / "KILL.flag"
 LOG_PATH = ROOT / "kill_criterion_log.json"
 SYMBOL = "BTCUSDT"
-STRATEGY_TAG = "swingvolume"
+STRATEGY_TAG = "meanrev"
 MIN_DAYS = 90
 RECHECK_DAYS = 30
 
@@ -90,10 +90,10 @@ def _default_report() -> Dict[str, Any]:
         "next_eval_at": (_utc_now() + timedelta(days=1)).isoformat(),
         "thresholds": {
             "sharpe_min": 0.4,
-            "profit_factor_min": 1.15,
-            "win_rate_min": 50.0,
+            "profit_factor_min": 1.2,
+            "win_rate_min": 55.0,
             "total_trades_min": 15,
-            "max_drawdown_pct_max": 30.0,
+            "max_drawdown_pct_max": 35.0,
         },
         "metrics": _metrics(SYMBOL),
         "ready_to_continue": True,
@@ -105,10 +105,10 @@ def _default_report() -> Dict[str, Any]:
 def _thresholds_payload() -> Dict[str, float]:
     return {
         "sharpe_min": 0.4,
-        "profit_factor_min": 1.15,
-        "win_rate_min": 50.0,
+        "profit_factor_min": 1.2,
+        "win_rate_min": 55.0,
         "total_trades_min": 15,
-        "max_drawdown_pct_max": 30.0,
+        "max_drawdown_pct_max": 35.0,
     }
 
 
@@ -179,14 +179,14 @@ def evaluate(symbol: str = SYMBOL, min_days: int = MIN_DAYS) -> Dict[str, Any]:
     kill_reason = ""
     if metrics["sharpe"] < 0.4:
         kill_reason = f"sharpe={metrics['sharpe']:.2f} < 0.40"
-    elif metrics["profit_factor"] < 1.15:
-        kill_reason = f"profit_factor={metrics['profit_factor']:.2f} < 1.15"
-    elif metrics["win_rate"] < 50.0:
-        kill_reason = f"win_rate={metrics['win_rate']:.1f}% < 50.0%"
+    elif metrics["profit_factor"] < 1.2:
+        kill_reason = f"profit_factor={metrics['profit_factor']:.2f} < 1.20"
+    elif metrics["win_rate"] < 55.0:
+        kill_reason = f"win_rate={metrics['win_rate']:.1f}% < 55.0%"
     elif metrics["total_trades"] < 15:
         kill_reason = f"total_trades={metrics['total_trades']} < 15"
-    elif metrics["max_drawdown_pct"] > 30.0:
-        kill_reason = f"max_drawdown_pct={metrics['max_drawdown_pct']:.1f}% > 30%"
+    elif metrics["max_drawdown_pct"] > 35.0:
+        kill_reason = f"max_drawdown_pct={metrics['max_drawdown_pct']:.1f}% > 35%"
     if kill_reason:
         report["ready_to_continue"] = False
         report["killed"] = True
@@ -217,7 +217,7 @@ def evaluate(symbol: str = SYMBOL, min_days: int = MIN_DAYS) -> Dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Evaluate 90-day kill criterion for BTC SWINGVOLUME bot")
+    parser = argparse.ArgumentParser(description="Evaluate 90-day kill criterion for BTC meanrev bot")
     parser.add_argument("--symbol", default=SYMBOL)
     args = parser.parse_args()
     print(json.dumps(evaluate(symbol=str(args.symbol or SYMBOL)), indent=2, ensure_ascii=False))

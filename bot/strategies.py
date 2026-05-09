@@ -6,6 +6,7 @@ from typing import Any, Dict
 import pandas as pd
 import pandas_ta as ta
 
+from feature_meanrev import MeanRevAnalyzer
 from feature_swingvolume import SwingVolumeAnalyzer
 from features import build_features
 
@@ -128,26 +129,27 @@ def signal_trend(last: Dict[str, Any], df: pd.DataFrame, cfg: Dict[str, Any]) ->
     return "NEUTRAL"
 
 
+def signal_meanrev_overshoot(df_1h: pd.DataFrame, cfg: Dict[str, Any] | None = None) -> Signal:
+    runtime_cfg = dict(cfg or {})
+    analyzer = MeanRevAnalyzer()
+    result = analyzer.build_signal(df_1h, runtime_cfg)
+    if result is None:
+        return Signal(reason="meanrev overshoot: sin confluencia", time_stop_bars=int(runtime_cfg.get("meanrev_time_stop_bars", 12)))
+    return Signal(
+        side=result.side,
+        confidence=0.85,
+        reason=result.reason,
+        stop_price=result.stop_price,
+        tp_price=result.tp_price,
+        entry_price=result.entry_price,
+        time_stop_bars=int(runtime_cfg.get("meanrev_time_stop_bars", 12)),
+        daily_bias="ALCISTA" if result.side == "LONG" else "BAJISTA",
+    )
+
+
 def signal_meanrev(last: Dict[str, Any], df: pd.DataFrame, cfg: Dict[str, Any]) -> str:
-    if last is None or df.empty:
-        return "NEUTRAL"
-    frame = _feature_frame(df)
-    row = frame.iloc[-1]
-    close = _safe_float(row.get("close"))
-    rsi = _safe_float(row.get("rsi"))
-    adx = _safe_float(row.get("adx"))
-    atr_z = _safe_float(row.get("atr_pct_zscore_50"))
-    bb_width = _safe_float(row.get("bb_width_20"))
-    bb_width_z = _safe_float(row.get("bb_width_zscore_50"))
-    lower = _safe_float(row.get("bb_lower_20"))
-    upper = _safe_float(row.get("bb_upper_20"))
-    if not (adx < 20.0 and -1.0 <= atr_z <= 0.5 and bb_width_z < 0.5 and bb_width > 0):
-        return "NEUTRAL"
-    if close <= lower and rsi <= 30.0:
-        return "LONG"
-    if close >= upper and rsi >= 70.0:
-        return "SHORT"
-    return "NEUTRAL"
+    signal = signal_meanrev_overshoot(df, cfg)
+    return signal.side
 
 
 def signal_breakout(last: Dict[str, Any], df: pd.DataFrame, cfg: Dict[str, Any]) -> str:

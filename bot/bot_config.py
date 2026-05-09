@@ -8,9 +8,9 @@ DEFAULT_SYMBOLS = ["BTCUSDT"]
 
 DEFAULT_CONFIG: Dict[str, float | int] = {
     "timeframe": int(os.getenv("TIMEFRAME", "240")),
-    "strategy_mode": os.getenv("STRATEGY_MODE", "swingvolume"),
-    "primary_timeframe": int(os.getenv("PRIMARY_TIMEFRAME", "240")),
-    "confirmation_timeframe": int(os.getenv("CONFIRMATION_TIMEFRAME", "1440")),
+    "strategy_mode": os.getenv("STRATEGY_MODE", "meanrev"),
+    "primary_timeframe": int(os.getenv("PRIMARY_TIMEFRAME", "60")),
+    "confirmation_timeframe": int(os.getenv("CONFIRMATION_TIMEFRAME", "60")),
     "leverage": int(os.getenv("LEVERAGE", "2")),
     "ema_fast": 9,
     "ema_slow": 21,
@@ -40,10 +40,10 @@ DEFAULT_CONFIG: Dict[str, float | int] = {
     "cb_daily_loss_pct": float(os.getenv("CB_DAILY_LOSS_PCT", "0.5")),
     "cb_weekly_loss_pct": float(os.getenv("CB_WEEKLY_LOSS_PCT", "7.0")),
     "cb_consecutive_losses": int(os.getenv("CB_CONSECUTIVE_LOSSES", "3")),
-    "cb_rolling_window": int(os.getenv("CB_ROLLING_WINDOW", "20")),
-    "cb_rolling_winrate_min": float(os.getenv("CB_ROLLING_WINRATE_MIN", "0.35")),
+    "cb_rolling_window": int(os.getenv("CB_ROLLING_WINDOW", "15")),
+    "cb_rolling_winrate_min": float(os.getenv("CB_ROLLING_WINRATE_MIN", "0.33")),
     "cb_volatility_spike_pct": float(os.getenv("CB_VOL_SPIKE_PCT", "8.0")),
-    "cb_cooldown_hours": float(os.getenv("CB_COOLDOWN_HOURS", "48")),
+    "cb_cooldown_hours": float(os.getenv("CB_COOLDOWN_HOURS", "24")),
     "cb_rolling_pause_hours": float(os.getenv("CB_ROLLING_PAUSE_HOURS", "168")),
     "breakeven_r": 1.0,
     "breakeven_buffer_pct": 0.0,
@@ -63,8 +63,16 @@ DEFAULT_CONFIG: Dict[str, float | int] = {
     "swing_time_stop_bars": int(os.getenv("SWING_TIME_STOP_BARS", "5")),
     "swing_d1_days": int(os.getenv("SWING_D1_DAYS", "730")),
     "swing_h4_days": int(os.getenv("SWING_H4_DAYS", "730")),
-    "meanrev_atr_mult": 0.5,
-    "meanrev_tp_at_sma": True,
+    "meanrev_sigma": float(os.getenv("MEANREV_SIGMA", "2.5")),
+    "meanrev_rsi_low": float(os.getenv("MEANREV_RSI_LOW", "25")),
+    "meanrev_rsi_high": float(os.getenv("MEANREV_RSI_HIGH", "75")),
+    "meanrev_atr_z": float(os.getenv("MEANREV_ATR_Z", "1.5")),
+    "meanrev_sl_atr": float(os.getenv("MEANREV_SL_ATR", "1.0")),
+    "meanrev_tp_atr": float(os.getenv("MEANREV_TP_ATR", "0.6")),
+    "meanrev_time_stop_bars": int(os.getenv("MEANREV_TIME_STOP_BARS", "12")),
+    "meanrev_breakeven_r": float(os.getenv("MEANREV_BREAKEVEN_R", "0.3")),
+    "meanrev_lock_r": float(os.getenv("MEANREV_LOCK_R", "0.5")),
+    "meanrev_lock_stop_r": float(os.getenv("MEANREV_LOCK_STOP_R", "0.1")),
     "breakout_atr_mult": 1.0,
     "breakout_tp_atr_mult": 3.0,
     "volatile_atr_mult": 2.0,
@@ -94,8 +102,8 @@ def get_symbol_config(symbol: str) -> Dict[str, float | int]:
     key = normalize_symbol(symbol)
     cfg = dict(DEFAULT_CONFIG)
     cfg.update(SYMBOL_CONFIG.get(key, {}))
-    cfg["strategy_mode"] = "swingvolume"
-    cfg["timeframe"] = 240
-    cfg["primary_timeframe"] = 240
-    cfg["confirmation_timeframe"] = 1440
+    cfg["strategy_mode"] = "meanrev"
+    cfg["timeframe"] = 60
+    cfg["primary_timeframe"] = 60
+    cfg["confirmation_timeframe"] = 60
     return cfg

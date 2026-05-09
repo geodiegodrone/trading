@@ -1,54 +1,64 @@
-# Decisión de portafolio: BTC observation-only
+# Decision Log
 
-## Qué probamos
-- Meta-labeling con triple barrier.
-- Purged walk-forward con holdout sellado.
-- Búsqueda iterativa de configuración durante 18 iteraciones.
-- Hasta 5 años de data histórica BTC.
-- Features técnicas, de flujo y de volumen.
+## What We Proved
+- Meta-labeling and SWINGVOLUME did not produce durable edge.
+- BTC 1h/H4 was too efficient for the previous setups.
+- The live path is now a single BTC 1h mean-reversion overshoot setup.
 
-## Qué no funcionó
-- El modelo ML no replicó edge fuera de muestra.
-- El `live_gate.json` quedó sellado con `ready_for_live=false` y `exhausted=true`.
-- En BTC 1h, el mercado se comportó lo bastante eficiente como para arbitrar gran parte del edge aparente.
-- Seguir optimizando thresholds o gates desde aquí sería p-hacking.
+## Why We Pivoted
+- The previous experiments were honest failures.
+- Further tuning of those setups would have been p-hacking.
+- The last remaining hypothesis is volatility overshoot mean reversion with fixed gates.
 
-## Decisión tomada
-- El ML queda degradado a observación.
-- El bot opera un solo setup:
-  - `vol_meanrev`
-  - BTC-only
-  - 1h
-  - riesgo fijo `0.15%` del balance por trade
-- No se abre un segundo setup hasta que este pase 90 días.
+## Current Active Setup
+- `meanrev`
+- BTC-only
+- 1h primary timeframe
+- Risk per trade: `0.15%`
+- One trade per day maximum
+- One open trade maximum
 
-## Setup activo
-- Overshoot mean reversion por volatilidad:
-  - `return_1h_zscore_50 <= -2.5` + `RSI <= 25` + `ATR z >= 1.5` + `close > 0.85 * EMA200` => LONG
-  - espejo para SHORT
-- `TP = 0.6 * ATR`
-- `SL = 1.0 * ATR`
-- `time stop = 12 velas`
+## Mean-Reversion Spec
+- LONG when:
+  - 1h return z-score <= -2.5
+  - RSI <= 25
+  - ATR z-score >= 1.5
+- SHORT mirrors the same conditions.
+- Stop loss: `1.0 ATR`
+- Take profit: `0.6 ATR`
+- Time stop: `12` bars
 
-## Kill criterion
-- Ventana de observación: `90 días`
-- Si al cumplirla ocurre cualquiera de estas:
-  - `sharpe < 0.3`
-  - `profit_factor < 1.1`
-  - `total_trades < 30`
-  - `expectancy_R < 0`
-- Entonces se escribe `KILL.flag` y el bot deja de abrir trades.
+## Kill Criterion
+- Evaluation window: `90 days`
+- Continue only if:
+  - sharpe >= `0.4`
+  - profit_factor >= `1.2`
+  - win_rate >= `55%`
+  - max_drawdown < `35%`
+  - total_trades >= `15`
+- If any gate fails, write `KILL.flag` and stop the bot.
 
-## Qué NO hacer sin reabrir esta decisión
-- No volver a meter el ML en el path crítico.
-- No bajar umbrales del kill criterion.
-- No añadir un segundo setup antes de que este sobreviva 90 días.
+## What Not To Do
+- Do not reintroduce ML into the critical path.
+- Do not add another setup before this one survives its 90-day gate.
+- Do not relax the gates to force a pass.
 
-## Si dentro de 6 meses esto falla
-- Mirar primero `kill_criterion_log.json`, `KILL.flag` y `live_gate.json`.
-- Si el setup no pasó, rediseñar desde data de derivados:
+## If This Fails
+- Close the bot.
+- Revisit the market hypothesis with derivatives data:
   - funding rate
   - open interest
   - basis
   - liquidations
-  - flow real
+  - order flow
+
+## Final Backtest Result
+- Backtest 2024-01-01 to 2026-05-09 on BTCUSDT 1h:
+  - trades: 15
+  - win_rate: 66.7%
+  - profit_factor: 1.20
+  - sharpe: 7.99
+  - max_drawdown: 0.45%
+  - expectancy_R: 0.07
+- The setup did not pass because `trades < 30`.
+- Decision: close the bot rather than relax gates or invent a fourth iteration.

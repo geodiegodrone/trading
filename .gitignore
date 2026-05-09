@@ -34,6 +34,7 @@ __pycache__/
 /bot/live_gate.json
 /bot/KILL.flag
 /bot/kill_criterion_log.json
+/bot/backtest_meanrev_report.json
 /bot/data/historical/*
 !/bot/data/historical/README.md
 /bot/data/swingvolume/*

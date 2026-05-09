@@ -14,6 +14,7 @@ import activity_log
 import binance_broker
 import circuit_breaker
 import data_manager
+import historical_data
 import kill_criterion
 import market_stream
 from bot_config import DEFAULT_CONFIG, get_symbol_config, parse_symbols
@@ -21,7 +22,7 @@ from features import FEATURE_COLUMNS, build_features
 import ml_model
 import regime as regime_detector
 import search_loop
-from strategies import Signal, enrich_indicators, signal_breakout, signal_meanrev, signal_swingvolume, signal_trend, signal_vol_meanrev, volume_filter_passes
+from strategies import Signal, enrich_indicators, signal_breakout, signal_meanrev, signal_meanrev_overshoot, signal_swingvolume, signal_trend, signal_vol_meanrev, volume_filter_passes
 import trade_log
 
 ROOT = Path(__file__).resolve().parent
@@ -81,12 +82,12 @@ def _live_gate_ready(gate):
 def _apply_live_gate_config(cfg, gate):
     runtime_cfg = dict(cfg)
     gate_cfg = gate.get("config") if isinstance(gate.get("config"), dict) else {}
-    if bool(gate.get("mode_demo_only")) and gate_cfg and str(gate_cfg.get("strategy_mode") or "").lower() == "swingvolume":
+    if bool(gate.get("mode_demo_only")) and gate_cfg and str(gate_cfg.get("strategy_mode") or "").lower() == "meanrev":
         runtime_cfg.update(gate["config"])
-    runtime_cfg["strategy_mode"] = "swingvolume"
-    runtime_cfg["primary_timeframe"] = 240
-    runtime_cfg["confirmation_timeframe"] = 1440
-    runtime_cfg["timeframe"] = 240
+    runtime_cfg["strategy_mode"] = "meanrev"
+    runtime_cfg["primary_timeframe"] = 60
+    runtime_cfg["confirmation_timeframe"] = 60
+    runtime_cfg["timeframe"] = 60
     return runtime_cfg
 
 
@@ -100,9 +101,9 @@ def _as_float(value, default=0.0):
 def _get_symbol_config(symbol):
     cfg = dict(DEFAULT_CONFIG)
     cfg.update(get_symbol_config(symbol))
-    cfg["strategy_mode"] = "swingvolume"
-    cfg["primary_timeframe"] = 240
-    cfg["confirmation_timeframe"] = 1440
+    cfg["strategy_mode"] = "meanrev"
+    cfg["primary_timeframe"] = 60
+    cfg["confirmation_timeframe"] = 60
     cfg["timeframe"] = int(cfg.get("timeframe", cfg["primary_timeframe"]))
     cfg["leverage"] = int(cfg.get("leverage", 2))
     cfg["ema_fast"] = int(cfg.get("ema_fast", 9))
@@ -163,8 +164,16 @@ def _get_symbol_config(symbol):
     cfg["vol_meanrev_sl_atr"] = float(cfg.get("vol_meanrev_sl_atr", 1.0))
     cfg["vol_meanrev_tp_atr"] = float(cfg.get("vol_meanrev_tp_atr", 0.6))
     cfg["vol_meanrev_time_stop_bars"] = int(cfg.get("vol_meanrev_time_stop_bars", 12))
-    cfg["meanrev_atr_mult"] = float(cfg.get("meanrev_atr_mult", 0.5))
-    cfg["meanrev_tp_at_sma"] = bool(cfg.get("meanrev_tp_at_sma", True))
+    cfg["meanrev_sigma"] = float(cfg.get("meanrev_sigma", 2.5))
+    cfg["meanrev_rsi_low"] = float(cfg.get("meanrev_rsi_low", 25.0))
+    cfg["meanrev_rsi_high"] = float(cfg.get("meanrev_rsi_high", 75.0))
+    cfg["meanrev_atr_z"] = float(cfg.get("meanrev_atr_z", 1.5))
+    cfg["meanrev_sl_atr"] = float(cfg.get("meanrev_sl_atr", 1.0))
+    cfg["meanrev_tp_atr"] = float(cfg.get("meanrev_tp_atr", 0.6))
+    cfg["meanrev_time_stop_bars"] = int(cfg.get("meanrev_time_stop_bars", 12))
+    cfg["meanrev_breakeven_r"] = float(cfg.get("meanrev_breakeven_r", 0.3))
+    cfg["meanrev_lock_r"] = float(cfg.get("meanrev_lock_r", 0.5))
+    cfg["meanrev_lock_stop_r"] = float(cfg.get("meanrev_lock_stop_r", 0.1))
     cfg["breakout_atr_mult"] = float(cfg.get("breakout_atr_mult", 1.0))
     cfg["breakout_tp_atr_mult"] = float(cfg.get("breakout_tp_atr_mult", 3.0))
     cfg["volatile_atr_mult"] = float(cfg.get("volatile_atr_mult", 2.0))
@@ -1048,7 +1057,7 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt, strategy_kin
     elif strategy_kind == "vol_meanrev":
         sl_dist = atr * float(cfg.get("vol_meanrev_sl_atr", 1.0))
     elif strategy_kind == "meanrev":
-        sl_dist = atr * float(cfg.get("meanrev_atr_mult", 0.5))
+        sl_dist = atr * float(cfg.get("meanrev_sl_atr", 1.0))
     elif strategy_kind == "breakout":
         sl_dist = atr * float(cfg.get("volatile_atr_mult", 2.0) if regime_name == "VOLATILE" else cfg.get("breakout_atr_mult", 1.0))
     else:
@@ -1057,8 +1066,8 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt, strategy_kin
         sl = price - sl_dist
         if strategy_kind == "vol_meanrev":
             tp = price + atr * float(cfg.get("vol_meanrev_tp_atr", 0.6))
-        elif strategy_kind == "meanrev" and bool(cfg.get("meanrev_tp_at_sma", True)) and sma20 > price:
-            tp = sma20
+        elif strategy_kind == "meanrev":
+            tp = price + atr * float(cfg.get("meanrev_tp_atr", 0.6))
         elif strategy_kind == "breakout":
             tp = price + atr * float(cfg.get("breakout_tp_atr_mult", 3.0))
         else:
@@ -1072,8 +1081,8 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt, strategy_kin
         sl = price + sl_dist
         if strategy_kind == "vol_meanrev":
             tp = price - atr * float(cfg.get("vol_meanrev_tp_atr", 0.6))
-        elif strategy_kind == "meanrev" and bool(cfg.get("meanrev_tp_at_sma", True)) and 0 < sma20 < price:
-            tp = sma20
+        elif strategy_kind == "meanrev":
+            tp = price - atr * float(cfg.get("meanrev_tp_atr", 0.6))
         elif strategy_kind == "breakout":
             tp = price - atr * float(cfg.get("breakout_tp_atr_mult", 3.0))
         else:
@@ -1142,7 +1151,7 @@ def _open_trade(symbol, signal, last, df, cfg, balance, trade_usdt, strategy_kin
         "strategy_kind": strategy_kind,
         "regime_name": regime_name,
         "primary_timeframe": int(cfg.get("primary_timeframe", cfg.get("timeframe", 60))),
-        "timeout_bars": int(signal.time_stop_bars) if strategy_kind == "swingvolume" and isinstance(signal, Signal) else int(cfg.get("vol_meanrev_time_stop_bars", 12)) if strategy_kind == "vol_meanrev" else int(cfg.get("t_bars", 24)),
+        "timeout_bars": int(signal.time_stop_bars) if strategy_kind == "meanrev" and isinstance(signal, Signal) else int(cfg.get("vol_meanrev_time_stop_bars", 12)) if strategy_kind == "vol_meanrev" else int(cfg.get("t_bars", 24)),
         "opened_ts_ms": int(_as_float(last.get("ts"))),
         "initial_stop_distance": sl_dist,
     }
@@ -1243,6 +1252,55 @@ def _update_position(symbol, last, signal, cfg):
             _close_trade(symbol, price, reason)
         _save_portfolio_state(_portfolio_state())
         return
+    if strategy_kind == "meanrev":
+        be_r = float(cfg.get("meanrev_breakeven_r", 0.3))
+        lock_r = float(cfg.get("meanrev_lock_r", 0.5))
+        lock_stop_r = float(cfg.get("meanrev_lock_stop_r", 0.1))
+        if side.lower() == "buy":
+            if risk_usdt > 0 and not position.get("breakeven_moved") and move_r >= be_r:
+                if entry > sl:
+                    sl = entry
+                    position["sl"] = sl
+                    position["breakeven_moved"] = True
+            if risk_usdt > 0 and atr > 0 and move_r >= lock_r:
+                trail_candidate = entry + initial_stop_distance * lock_stop_r
+                if trail_candidate > sl:
+                    sl = trail_candidate
+                    position["sl"] = sl
+            if elapsed_bars >= int(position.get("timeout_bars", cfg.get("meanrev_time_stop_bars", 12))):
+                hit_exit = True
+                reason = "EXIT_TIMEOUT"
+            elif price <= sl or price >= tp:
+                hit_exit = True
+                reason = "SL" if price <= sl else "TP"
+        else:
+            if risk_usdt > 0 and not position.get("breakeven_moved") and move_r >= be_r:
+                if sl <= 0 or entry < sl:
+                    sl = entry
+                    position["sl"] = sl
+                    position["breakeven_moved"] = True
+            if risk_usdt > 0 and atr > 0 and move_r >= lock_r:
+                trail_candidate = entry - initial_stop_distance * lock_stop_r
+                if sl <= 0 or trail_candidate < sl:
+                    sl = trail_candidate
+                    position["sl"] = sl
+            if elapsed_bars >= int(position.get("timeout_bars", cfg.get("meanrev_time_stop_bars", 12))):
+                hit_exit = True
+                reason = "EXIT_TIMEOUT"
+            elif price >= sl or price <= tp:
+                hit_exit = True
+                reason = "SL" if price >= sl else "TP"
+        if hit_exit:
+            _close_trade(symbol, position, price, reason=reason)
+            state["open_positions"].pop(symbol, None)
+            _save_portfolio_state(state)
+            registry = _open_trade_registry()
+            registry.pop(symbol, None)
+            _save_trade_registry(registry)
+        else:
+            state["open_positions"][symbol] = position
+            _save_portfolio_state(_calc_portfolio_risk(_as_float(binance_broker.get_balance()), state))
+        return
     if side.lower() == "buy":
         position["peak_price"] = max(_as_float(position.get("peak_price"), price), price)
         if risk_usdt > 0 and not position.get("breakeven_moved") and move_r >= float(cfg.get("breakeven_r", 1.0)):
@@ -1336,19 +1394,19 @@ def _regime_threshold(regime_name, cfg):
 
 
 def _select_signal(symbol, primary_df, confirmation_df, cfg):
-    signal = signal_swingvolume(confirmation_df, primary_df, last_n_bars_h4=40)
+    signal = signal_meanrev_overshoot(primary_df, cfg)
     bias = str(signal.daily_bias or "NEUTRAL").upper()
-    activity_log.push(symbol, "setup", f"SWINGVOLUME | bias={bias} | side={signal.side} | reason={signal.reason}")
+    activity_log.push(symbol, "setup", f"MEANREV | bias={bias} | side={signal.side} | reason={signal.reason}")
     meta = {
         "reason": signal.reason,
-        "source": "swingvolume",
+        "source": "meanrev",
         "daily_bias": bias,
         "stop_price": signal.stop_price,
         "tp_price": signal.tp_price,
         "entry_price": signal.entry_price,
         "time_stop_bars": signal.time_stop_bars,
     }
-    return signal, "swingvolume", bias, meta
+    return signal, "meanrev", bias, meta
 
 
 def _startup_diagnostics(symbol, cfg):
@@ -1365,8 +1423,8 @@ def _startup_diagnostics(symbol, cfg):
     lines = [
         "=" * 60,
         "BOT STARTUP DIAGNOSTICS",
-        f"Strategy mode: {cfg['strategy_mode']} (SWINGVOLUME only)",
-        f"Primary TF: {int(cfg['primary_timeframe'])}m | Confirmation TF: {int(cfg['confirmation_timeframe'])}m",
+        f"Strategy mode: {cfg['strategy_mode']} (MEANREV only)",
+        f"Primary TF: {int(cfg['primary_timeframe'])}m",
         f"ML model: trained_on={int(info.get('trained_on', 0) or 0)} ready={bool(info.get('ready', False))} sharpe={float(info.get('val_sharpe', 0.0)):.2f} thr={float(info.get('suggested_threshold', cfg.get('ml_threshold', 0.55))):.2f}",
         f"ML feature count expected={expected} / model={model_count} {'MISMATCH!' if mismatch else 'OK'}",
         f"Circuit breaker: enabled={bool(cfg.get('circuit_breaker_enabled', True))} paused={bool(cb_status.get('paused', False))}",
@@ -1402,9 +1460,9 @@ def run_symbol(symbol, cfg, shared_stop_event):
             daily_state = _load_daily_balance()
             weekly_state = _load_weekly_balance()
             primary_df = _compute_indicators(_fetch_candles(symbol, runtime_cfg["primary_timeframe"], limit=420), runtime_cfg)
-            confirmation_df = _compute_indicators(_fetch_candles(symbol, runtime_cfg["confirmation_timeframe"], limit=520), runtime_cfg)
-            if primary_df.empty or len(primary_df) < 60 or confirmation_df.empty or len(confirmation_df) < 220:
-                _log_decision(symbol, {"regime": "N/A", "strategy_used": "swingvolume", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "SALTAR", "decision_reason_code": "data_gap", "decision_reason": "velas H4/D1 insuficientes"})
+            confirmation_df = primary_df
+            if primary_df.empty or len(primary_df) < 60:
+                _log_decision(symbol, {"regime": "N/A", "strategy_used": "meanrev", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "SALTAR", "decision_reason_code": "data_gap", "decision_reason": "velas 1h insuficientes"})
                 time.sleep(60)
                 continue
             last = primary_df.iloc[-1].to_dict()
@@ -1412,7 +1470,7 @@ def run_symbol(symbol, cfg, shared_stop_event):
             position = _get_current_position(symbol)
             if position:
                 _update_position(symbol, last, signal.side if isinstance(signal, Signal) else str(signal), runtime_cfg)
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side if isinstance(signal, Signal) else str(signal), "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "POSICION_ABIERTA", "decision_reason_code": "position_open", "decision_reason": "gestión de posición swingvolume"})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side if isinstance(signal, Signal) else str(signal), "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "POSICION_ABIERTA", "decision_reason_code": "position_open", "decision_reason": "gestión de posición meanrev"})
                 time.sleep(60)
                 continue
             if not gate_ready:
@@ -1453,7 +1511,7 @@ def run_symbol(symbol, cfg, shared_stop_event):
             state = _calc_portfolio_risk(balance, state)
             _save_portfolio_state(state)
             if not isinstance(signal, Signal) or signal.side == "NEUTRAL":
-                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side if isinstance(signal, Signal) else str(signal), "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "SALTAR", "decision_reason_code": "primary_neutral", "decision_reason": signal_meta.get("reason") or "sin señal swingvolume"})
+                _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side if isinstance(signal, Signal) else str(signal), "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "SALTAR", "decision_reason_code": "primary_neutral", "decision_reason": signal_meta.get("reason") or "sin señal meanrev"})
                 time.sleep(60)
                 continue
             if _opened_trade_today(symbol) >= int(runtime_cfg.get("max_trades_per_day", 1)):
@@ -1478,27 +1536,26 @@ def run_symbol(symbol, cfg, shared_stop_event):
                 _log_decision(symbol, {"regime": regime_name, "strategy_used": strategy_kind, "signal": signal.side, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "RECHAZAR", "decision_reason_code": "daily_risk_cap", "decision_reason": f"riesgo proyectado {projected:.2f}% > cap {float(runtime_cfg.get('daily_risk_cap', 0.5)):.2f}%"})
                 time.sleep(60)
                 continue
-            activity_log.push(symbol, "mode", f"OBSERVATION mode | setup=swingvolume | risk={float(runtime_cfg.get('risk_pct_per_trade', 0.15)):.2f}%")
-            _open_trade(symbol, signal, last, primary_df, runtime_cfg, balance, trade_usdt, strategy_kind="swingvolume", regime_name=regime_name)
-            _log_decision(symbol, {"regime": regime_name, "strategy_used": "swingvolume", "signal": signal.side, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "ABRIR", "decision_reason_code": "open", "decision_reason": f"{signal_meta.get('reason') or 'swingvolume confirmado'} | OBSERVATION 0.15% risk", "mode": "observation", "size_pct": "100%"})
+            activity_log.push(symbol, "mode", f"OBSERVATION mode | setup=meanrev | risk={float(runtime_cfg.get('risk_pct_per_trade', 0.15)):.2f}%")
+            _open_trade(symbol, signal, last, primary_df, runtime_cfg, balance, trade_usdt, strategy_kind="meanrev", regime_name=regime_name)
+            _log_decision(symbol, {"regime": regime_name, "strategy_used": "meanrev", "signal": signal.side, "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": cb_status_text, "decision": "ABRIR", "decision_reason_code": "open", "decision_reason": f"{signal_meta.get('reason') or 'meanrev confirmado'} | OBSERVATION 0.15% risk", "mode": "observation", "size_pct": "100%"})
         except Exception as exc:
             logger.exception("Symbol loop error for %s", symbol)
             activity_log.push(symbol, "error", f"Error: {exc}")
-            _log_decision(symbol, {"regime": "N/A", "strategy_used": "swingvolume", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "SALTAR", "decision_reason_code": "error", "decision_reason": f"error: {exc}"})
+            _log_decision(symbol, {"regime": "N/A", "strategy_used": "meanrev", "signal": "NEUTRAL", "ml_ready": False, "ml_confidence": 0.0, "ml_threshold_used": 0.0, "circuit_breaker": "ok", "decision": "SALTAR", "decision_reason_code": "error", "decision_reason": f"error: {exc}"})
         time.sleep(60)
 
 
 def main():
     base_cfg = _get_symbol_config("BTCUSDT")
     try:
-        data_manager.refresh_swingvolume_data("BTCUSDT", force=False, daily_days=int(base_cfg.get("swing_d1_days", 730)), h4_days=int(base_cfg.get("swing_h4_days", 730)))
+        historical_data.download_history("BTCUSDT", 60, int(base_cfg.get("meanrev_history_days", 730)), force=False)
     except Exception:
-        logger.exception("Failed to refresh swingvolume caches at startup")
+        logger.exception("Failed to refresh meanrev history at startup")
     stream_pairs = []
     for symbol in SYMBOLS:
         cfg = _get_symbol_config(symbol)
         stream_pairs.append((symbol, cfg["primary_timeframe"]))
-        stream_pairs.append((symbol, cfg["confirmation_timeframe"]))
     market_stream.start(stream_pairs)
     reconcile_state()
     kill_criterion.evaluate("BTCUSDT")
@@ -1520,9 +1577,9 @@ def main():
                 last_reconcile = now
             if now - last_kill_check >= 24 * 3600:
                 try:
-                    data_manager.refresh_swingvolume_data("BTCUSDT", force=False, daily_days=int(base_cfg.get("swing_d1_days", 730)), h4_days=int(base_cfg.get("swing_h4_days", 730)))
+                    historical_data.download_history("BTCUSDT", 60, int(base_cfg.get("meanrev_history_days", 730)), force=False)
                 except Exception:
-                    logger.exception("Failed to refresh swingvolume caches")
+                    logger.exception("Failed to refresh meanrev history")
                 kill_criterion.evaluate("BTCUSDT")
                 last_kill_check = now
             for thread in threads:
