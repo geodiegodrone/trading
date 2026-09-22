@@ -29,6 +29,7 @@ __pycache__/
 /bot/backtest_walkforward_report.json
 /bot/model.pkl
 /bot/model_*.pkl
+/bot/mlruns/
 /bot/search_log.jsonl
 /bot/search_status.json
 /bot/live_gate.json

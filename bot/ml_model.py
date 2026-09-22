@@ -479,6 +479,50 @@ def _serialize_state(state: Dict[str, Any]) -> None:
         pickle.dump(state, handle)
 
 
+def _track_training_run(state: Dict[str, Any], symbol: Optional[str]) -> None:
+    """Record validation evidence and model artifacts without blocking training."""
+    if os.getenv("TRADING_MLFLOW_ENABLED", "true").lower() in {"0", "false", "no"}:
+        return
+    try:
+        import mlflow
+        import mlflow.sklearn
+
+        tracking_uri = os.getenv("MLFLOW_TRACKING_URI", str(BASE_DIR / "mlruns"))
+        experiment = os.getenv("MLFLOW_EXPERIMENT_NAME", "trading-walk-forward-models")
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment(experiment)
+        run_name = f"{symbol or 'BTCUSDT'}-{state['model_type']}-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+        with mlflow.start_run(run_name=run_name):
+            mlflow.log_params({
+                "symbol": symbol or "BTCUSDT",
+                "model_type": state["model_type"],
+                "feature_count": state["feature_count"],
+                "trained_on": state["trained_on"],
+                "train_samples": state["train_samples"],
+                "validation_samples": state["validation_samples"],
+                "usable_folds": state["usable_folds"],
+                "suggested_threshold": state["suggested_threshold"],
+                "calibration": "isotonic",
+            })
+            mlflow.log_metrics({
+                "val_auc": state["val_auc"],
+                "val_f1": state["val_f1"],
+                "val_sharpe": state["val_sharpe"],
+                "val_drawdown": state["val_drawdown"],
+                "coverage_pct": state["coverage_pct"],
+                "validation_trades": state["validation_trades"],
+            })
+            mlflow.set_tags({
+                "ready": str(bool(state["ready"])).lower(),
+                "validation": "purged_walk_forward" if state["fold_metrics"] else "chronological_holdout",
+            })
+            mlflow.sklearn.log_model(state["model"], artifact_path="estimator")
+            mlflow.sklearn.log_model(state["calibrator"], artifact_path="calibrator")
+            mlflow.log_artifact(str(MODEL_PATH), artifact_path="deployment_state")
+    except Exception as exc:
+        print(f"[ml_model] MLflow tracking failed; model remains saved locally: {exc}")
+
+
 def _load_state() -> Dict[str, Any]:
     for path in (MODEL_PATH, LEGACY_MODEL_PATH):
         if path.exists():
@@ -839,6 +883,7 @@ def train(
         if not state:
             return
         _serialize_state(state)
+        _track_training_run(state, symbol)
         print(
             f"[ml_model] BTCUSDT trained={state['trained_on']} "
             f"val_sharpe={state['val_sharpe']:.3f} "

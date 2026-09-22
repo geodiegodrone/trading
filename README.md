@@ -29,6 +29,7 @@ Trading repos often show only a strategy script. This repository is stronger bec
 - dashboard payload tests,
 - VPS deployment assets,
 - separation between research, execution, and monitoring.
+- MLflow runs for fitted estimators, isotonic calibration, and walk-forward validation evidence.
 
 ## Quickstart
 
