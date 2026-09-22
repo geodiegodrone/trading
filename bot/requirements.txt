@@ -9,3 +9,4 @@ lightgbm
 xgboost
 python-binance
 pyarrow
+mlflow==2.16.2
